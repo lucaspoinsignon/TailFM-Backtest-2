@@ -17,6 +17,13 @@ If HS is rejected far more often than 5% while FHS is close to 5%, the tests are
 once the volatility regime is conditioned on, and the earlier rejections were the
 regime clustering.  Self-contained: only reads the repo's csvio / splits / backtest.
 
+v2 adds one diagnostic table and changes nothing else (the rejection tables are
+identical to v1): at h = 1, the exception rate of HS and FHS by market regime,
+pooled over the splits.  The regime of a held-out day is the tercile of the portfolio's
+trailing 63-day realised volatility (returns strictly before that day; terciles cut on
+the training rows).  A calibrated law has ~5% / ~1% in EVERY regime; the pattern shows
+where a law is too cautious (rate below target) or too aggressive (above).
+
     python placebo_fhs.py --data data/returns_clean.csv --splits 50
 """
 
@@ -159,6 +166,15 @@ def main():
     pv = {m: {h: {k: [] for k in tests} for h in H} for m in ("HS", "FHS")}
     zv = {m: {h: {k: [] for k in tests[2:]} for h in H} for m in ("HS", "FHS")}
     rng = np.random.default_rng(0)
+    # regime state: trailing 63-day realised vol of the portfolio, past data only
+    xp = r @ w
+    c1, c2 = np.concatenate([[0], np.cumsum(xp)]), np.concatenate([[0], np.cumsum(xp ** 2)])
+    L = 63
+    state_vol = np.full(T, np.nan)
+    t_ = np.arange(L, T)
+    state_vol[t_] = np.sqrt((c2[t_] - c2[t_ - L]) / L - ((c1[t_] - c1[t_ - L]) / L) ** 2)
+    terc = {"days": np.zeros(3)}
+    terc.update({(m, lv): np.zeros(3) for m in ("HS", "FHS") for lv in var_lv})
 
     t0 = time.time()
     for seed in range(a.splits):
@@ -175,8 +191,17 @@ def main():
                                for i in range(sp.block // h)])
             laws = {"HS": predictive_from_windows(win, w, h),
                     "FHS": CondLaw(fhs_scenarios(eps, sig, starts, w, h, a.lam, iv))}
+            if h == 1:
+                trm = sp.train_row_mask() & np.isfinite(state_vol)
+                cuts = np.quantile(state_vol[trm], [1 / 3, 2 / 3])
+                ok = np.isfinite(state_vol[starts])
+                regime = np.digitize(state_vol[starts], cuts)        # 0 calm .. 2 stressed
+                terc["days"] += np.bincount(regime[ok], minlength=3)
             for m, P in laws.items():
                 for lv in var_lv:
+                    if h == 1:
+                        exc = ((x + P.var(1 - lv)) < 0)[ok]
+                        terc[(m, lv)] += np.bincount(regime[ok], weights=exc, minlength=3)
                     n_exc = int(((x + P.var(1 - lv)) < 0).sum())
                     pv[m][h][f"PF {lv:g}"].append(pf_test(n_exc, x.size, 1 - lv)["p_value"])
                 for lv in es_lv:
@@ -211,6 +236,17 @@ def main():
                 else:
                     row += f" {rate:{9 if m == 'HS' else 10}.0%} {'':>9s} {'':>8s} |"
             print(row.rstrip(" |"))
+        if h == 1:
+            d = terc["days"]
+            print(f"\n=== h = 1: exception rate by market regime (trailing 63-day vol "
+                  f"tercile), pooled over {a.splits} splits ===")
+            print(f"{'':>10s} {'calm':>9s} {'middle':>9s} {'stressed':>9s}   target")
+            print(f"{'days':>10s} " + " ".join(f"{v:9.0f}" for v in d))
+            for lv in var_lv:
+                for m in ("HS", "FHS"):
+                    rates = terc[(m, lv)] / np.maximum(d, 1)
+                    print(f"{m + ' ' + format(lv, 'g'):>10s} "
+                          + " ".join(f"{v:9.2%}" for v in rates) + f"   {1 - lv:.0%}")
 
 
 if __name__ == "__main__":
