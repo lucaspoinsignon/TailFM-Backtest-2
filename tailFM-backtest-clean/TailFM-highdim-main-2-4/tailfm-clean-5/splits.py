@@ -53,6 +53,7 @@ class Split:
     test_starts: list = field(default_factory=list)
     data: str = ""
     data_sha1: str = ""
+    train_ranges: list = field(default_factory=list)   # [[row_start, row_end), ...]
 
     # ------------------------------------------------------------------ masks
     def test_row_mask(self) -> np.ndarray:
@@ -62,8 +63,14 @@ class Split:
         return m
 
     def train_row_mask(self) -> np.ndarray:
-        """Every row not inside a test block."""
-        return ~self.test_row_mask()
+        """Every row not inside a test block (and inside `train_ranges`, if set)."""
+        m = ~self.test_row_mask()
+        if self.train_ranges:
+            keep = np.zeros(self.T, dtype=bool)
+            for a, b in self.train_ranges:
+                keep[a:b] = True
+            m &= keep
+        return m
 
     # ---------------------------------------------------------------- windows
     def train_window_starts(self, n: int | None = None,
@@ -118,11 +125,12 @@ class Split:
         """Short digest of everything that defines the partition; two splits are
         interchangeable iff their ids match.
         """
-        payload = json.dumps(dict(
-            T=self.T, n=self.n, block=self.block, horizon=self.horizon,
-            sampling=self.sampling, test_starts=list(self.test_starts),
-            data_sha1=self.data_sha1),
-            sort_keys=True)
+        d = dict(T=self.T, n=self.n, block=self.block, horizon=self.horizon,
+                 sampling=self.sampling, test_starts=list(self.test_starts),
+                 data_sha1=self.data_sha1)
+        if self.train_ranges:                    # absent -> same id as before
+            d["train_ranges"] = self.train_ranges
+        payload = json.dumps(d, sort_keys=True)
         return hashlib.sha1(payload.encode()).hexdigest()[:10]
 
     def summary(self) -> str:
@@ -133,7 +141,7 @@ class Split:
                 and self.test_starts[0] + self.block == self.T
                 else f"{self.sampling} random-block")
         return (f"split[{self.id()}]: {kind}, {len(self.test_starts)} test block(s) of "
-                f"{self.block} | rows train/test {self.T - te_rows}/{te_rows} | "
+                f"{self.block} | rows train/test {int(self.train_row_mask().sum())}/{te_rows} | "
                 f"train windows {n_win} of {n_raw} raw "
                 f"({n_win / max(n_raw, 1):.0%} kept after purge) | "
                 f"test h={self.horizon} blocks "
