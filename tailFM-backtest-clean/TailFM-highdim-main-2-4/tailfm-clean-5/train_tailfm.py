@@ -21,6 +21,7 @@ import os
 import pickle
 
 import numpy as np
+import pandas as pd
 import torch
 
 from csvio import load_returns, feature_names_from_csv
@@ -40,6 +41,10 @@ def parse_args():
                     help="risk horizon the held-out blocks are cut for; recorded in "
                          "split.json and reused by evaluate.py / run_backtest.py")
     add_split_args(ap)
+    ap.add_argument("--train-period", nargs=2, action="append", metavar=("START", "END"),
+                    help="restrict training to [START, END] (YYYY-MM-DD); repeat for a union")
+    ap.add_argument("--test-period", nargs=2, action="append", metavar=("START", "END"),
+                    help="test on [START, END] (YYYY-MM-DD); repeat for a union")
     ap.add_argument("--q-tail", type=float, default=0.05,
                     help="EVT threshold quantile, per tail")
     ap.add_argument("--nu", type=float, default=5.0,
@@ -84,6 +89,16 @@ def run(args):
     T, f = r.shape
     names = feature_names_from_csv(args.data, f)
     split = build_split(args, T, data=os.path.abspath(args.data))
+    if args.train_period or args.test_period:
+        dates = pd.to_datetime(pd.read_csv(args.data, usecols=[0]).iloc[-T:, 0])
+        rows = lambda a, b: [int(dates.searchsorted(pd.Timestamp(a))),
+                             int(dates.searchsorted(pd.Timestamp(b), side="right"))]
+        if args.train_period:
+            split.train_ranges = [rows(a, b) for a, b in args.train_period]
+        if args.test_period:
+            split.test_starts = [s for a, b in args.test_period for c, d in [rows(a, b)]
+                                 for s in range(c, d - split.block + 1, split.block)]
+            split.sampling = "dates"
     split.save(f"{args.outdir}/split.json")
     real = split.train_windows(r, args.n, args.stride)
     train_r = split.train_rows(r)
