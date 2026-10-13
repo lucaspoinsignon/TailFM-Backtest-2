@@ -23,6 +23,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import torch
+from scipy import stats
 
 from csvio import load_returns, feature_names_from_csv
 from evt_shrink import shrink_ensemble
@@ -41,27 +42,38 @@ def ewma_sigma(r, lam, init_var, floor_var):
 
 
 def conditional_recalibrator(model, marg, num, n, f, **kw):
-    """Monotone per-feature map x -> F_hat_j^{-1}(G_j(x)), G_j the marginal of the
-    u ~ U(0, 1) mixture of conditional samples.  u is uniform on the training windows,
-    so that mixture must have the EVT marginals F_hat_j: the map removes the flow's
-    marginal distortion, like the unconditional rank-recalibration, while keeping the
-    copula and the ordering across regimes."""
-    u_mix = (np.arange(num) + 0.5) / num
-    z = sample(model, num, n, f, nu=marg.nu_, cond=u_mix, **kw).numpy()
-    mix = np.sort(marg.inverse_transform(z).reshape(-1, f).astype(np.float32), axis=0)
-    del z
-    K = mix.shape[0]
-    q = np.array([m.ppf(np.array([0.005, 0.995])) for m in marg.marginals_])
-    print(f"flow marginals before recalibration (u-mixture): median ratio of the "
-          f"0.5% / 99.5% quantile to EVT = {np.median(mix[int(0.005 * K)] / q[:, 0]):.3f}"
-          f" / {np.median(mix[int(0.995 * K)] / q[:, 1]):.3f}  (1 = exact)")
+    """Continuous monotone per-feature map z -> phi_j(z) on the flow output, so that
+    the u ~ U(0, 1) mixture of conditional samples has exactly t_nu marginals in
+    z-space, i.e. the EVT marginals F_hat_j after the inverse PIT.  u is uniform on
+    the training windows, so that mixture must have them: the map removes the flow's
+    marginal distortion, like the unconditional rank-recalibration, while keeping
+    the copula and the ordering across regimes.
 
-    def recal(gen):
-        flat = gen.reshape(-1, f).copy()
+    phi_j is piecewise linear through (mixture order statistic k, t_nu quantile
+    k/(K+1)) and linear beyond the mixture's range, with the slope of its outer 1%:
+    both tails are t-like, so the map is asymptotically a rescaling there.  The GPD
+    tails of F_hat_j then extrapolate smoothly, with no ties and no cap."""
+    u_mix = (np.arange(num) + 0.5) / num
+    zs = np.sort(sample(model, num, n, f, nu=marg.nu_, cond=u_mix, **kw).numpy()
+                 .reshape(-1, f), axis=0)
+    K = zs.shape[0]
+    tq = stats.t.ppf(np.arange(1, K + 1) / (K + 1.0), df=marg.nu_)
+    m = max(K // 100, 1)
+    k1, k2 = int(0.005 * K), int(0.995 * K)
+    print(f"flow marginals before recalibration (u-mixture, z-space): median ratio of "
+          f"the 0.5% / 99.5% quantile to t_nu = {np.median(zs[k1] / tq[k1]):.3f} / "
+          f"{np.median(zs[k2] / tq[k2]):.3f}  (1 = exact)")
+
+    def recal(z):
+        flat = z.reshape(-1, f).astype(float)
         for j in range(f):
-            p = (np.searchsorted(mix[:, j], flat[:, j]) + 0.5) / (K + 1.0)
-            flat[:, j] = marg.marginals_[j].ppf(p)
-        return flat.reshape(gen.shape)
+            zj, x = zs[:, j], flat[:, j]
+            y = np.interp(x, zj, tq)
+            lo, hi = x < zj[0], x > zj[-1]
+            y[lo] = tq[0] + (x[lo] - zj[0]) * (tq[m] - tq[0]) / (zj[m] - zj[0])
+            y[hi] = tq[-1] + (x[hi] - zj[-1]) * (tq[-1] - tq[-1 - m]) / (zj[-1] - zj[-1 - m])
+            flat[:, j] = y
+        return flat.reshape(z.shape)
     return recal
 
 
@@ -232,8 +244,8 @@ def run(args):
     for lev in (args.gen_cond or [None]):
         z_gen = sample(ema.shadow, args.gen, args.n, f, nu=marg.nu_,
                        n_steps=args.ode_steps, mix_dim=args.mix_dim,
-                       device=device, seed=args.seed, cond=lev)
-        gen = marg.inverse_transform(z_gen.numpy())
+                       device=device, seed=args.seed, cond=lev).numpy()
+        gen = marg.inverse_transform(z_gen if recal is None else recal(z_gen))
         del z_gen
         if not args.no_recalibrate and lev is None:
             # rank-recalibration: x -> F_hat_j^{-1}(rank/(K+1)) makes each generated
@@ -250,8 +262,6 @@ def run(args):
                 for j in range(a, b):
                     flat[:, j] = marg.marginals_[j].ppf(u[j - a])
             gen = flat.reshape(args.gen, args.n, f)
-        elif recal is not None:
-            gen = recal(gen)
         np.save(f"{args.outdir}/generated_windows"
                 f"{'' if lev is None else f'_u{lev:.2f}'}.npy", gen)
 
