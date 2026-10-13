@@ -31,6 +31,15 @@ from splits import add_split_args, build_split
 from tailfm import MarginalEnsemble, VelocityField, train_cfm, sample
 
 
+def ewma_sigma(r, lam, init_var, floor_var):
+    """RiskMetrics EWMA vol; sigma_t uses returns up to t-1, so it is known at t."""
+    s2 = np.empty_like(r)
+    s2[0] = init_var
+    for t in range(1, r.shape[0]):
+        s2[t] = np.maximum(lam * s2[t - 1] + (1 - lam) * r[t - 1] ** 2, floor_var)
+    return np.sqrt(s2)
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="CSV or .npy of shape (T, f)")
@@ -45,6 +54,9 @@ def parse_args():
                     help="restrict training to [START, END] (YYYY-MM-DD); repeat for a union")
     ap.add_argument("--test-period", nargs=2, action="append", metavar=("START", "END"),
                     help="test on [START, END] (YYYY-MM-DD); repeat for a union")
+    ap.add_argument("--train-all", action="store_true",
+                    help="no held-out blocks: train on every day (the backtest is then "
+                         "in-sample, see run_backtest.py --cond-band)")
     ap.add_argument("--q-tail", type=float, default=0.05,
                     help="EVT threshold quantile, per tail")
     ap.add_argument("--nu", type=float, default=5.0,
@@ -72,6 +84,13 @@ def parse_args():
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--no-recalibrate", action="store_true",
                     help="disable rank-recalibration of generated marginals")
+    ap.add_argument("--gen-cond", type=float, nargs="+", default=None,
+                    help="regime level(s) u in [0, 1] = train percentile of the EWMA "
+                         "vol of --cond-valor; turns conditioning on and writes one "
+                         "generated_windows_u<u>.npy per level.  Omit: unconditional")
+    ap.add_argument("--cond-valor", type=str, default=None,
+                    help="VALOR (CSV column name) whose EWMA vol is the regime")
+    ap.add_argument("--ewma-lam", type=float, default=0.94)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default="runs/final")
     ap.add_argument("--log", type=str, default=None,
@@ -99,12 +118,33 @@ def run(args):
             split.test_starts = [s for a, b in args.test_period for c, d in [rows(a, b)]
                                  for s in range(c, d - split.block + 1, split.block)]
             split.sampling = "dates"
+    if args.train_all:
+        split.test_starts = []
     split.save(f"{args.outdir}/split.json")
     real = split.train_windows(r, args.n, args.stride)
     train_r = split.train_rows(r)
     print(f"data: T={T}, f={f} | device={device}")
     print(split.summary())
     print(f"train windows {real.shape} | marginal rows {train_r.shape[0]}")
+
+    # ---------------------------------------- optional regime condition u in [0, 1]
+    # u = train percentile of the EWMA vol of one VALOR at each window's first day
+    cond = None
+    if args.gen_cond:
+        if not args.cond_valor:
+            raise SystemExit("--gen-cond needs --cond-valor")
+        rj = r[:, names.index(args.cond_valor)]
+        tr = split.train_row_mask()
+        sig = ewma_sigma(rj, args.ewma_lam, init_var=rj[tr].var(), floor_var=1e-12)
+        ref = np.sort(sig[tr])
+        np.save(f"{args.outdir}/cond_sigma_ref.npy", ref)     # u <-> sigma lookup
+        u = np.searchsorted(ref, sig, side="right") / ref.size
+        np.save(f"{args.outdir}/cond_u.npy", u)              # u of every day, for the backtest
+        cond = torch.tensor(u[split.train_window_starts(args.n, args.stride)],
+                            dtype=torch.float32)
+        print(f"condition: EWMA vol of {args.cond_valor} (lambda={args.ewma_lam}); "
+              f"sigma at u = 0.1 / 0.5 / 0.9: "
+              + " / ".join(f"{np.quantile(ref, q):.4f}" for q in (0.1, 0.5, 0.9)))
 
     # -------------------------------------------------- EVT marginals + PIT
     # fitted on the training ROWS, not on `real`: windows overlap at stride 1, so
@@ -124,35 +164,39 @@ def run(args):
 
     # --------------------------------------------------------------- training
     model = VelocityField(f=f, n_max=args.n, d_model=args.d_model, depth=args.depth,
-                          pos_std=args.pos_std)
+                          pos_std=args.pos_std, cond=cond is not None)
     ema, _ = train_cfm(model, z, nu=marg.nu_, steps=args.steps,
                        batch_size=args.batch, mix_dim=args.mix_dim,
-                       device=device, seed=args.seed)
+                       device=device, seed=args.seed, cond=cond)
     torch.save(ema.shadow.state_dict(), f"{args.outdir}/model_ema.pt")
     pickle.dump(marg, open(f"{args.outdir}/marginals.pkl", "wb"))
 
     # --------------------------------------------------------------- sampling
-    z_gen = sample(ema.shadow, args.gen, args.n, f, nu=marg.nu_,
-                   n_steps=args.ode_steps, mix_dim=args.mix_dim,
-                   device=device, seed=args.seed)
-    gen = marg.inverse_transform(z_gen.numpy())
-    del z_gen
-    if not args.no_recalibrate:
-        # rank-recalibration: x -> F_hat_j^{-1}(rank/(K+1)) makes each generated
-        # marginal exactly F_hat_j and leaves the learned copula invariant (Sklar)
-        flat = gen.reshape(-1, f)
-        K = flat.shape[0]
-        rank = np.arange(1, K + 1, dtype=float) / (K + 1.0)
-        for a in range(0, f, 32):                      # column blocks
-            b = min(a + 32, f)
-            blk = np.ascontiguousarray(flat[:, a:b].T)
-            idx = np.argsort(blk, axis=1)
-            u = np.empty(blk.shape)
-            np.put_along_axis(u, idx, np.broadcast_to(rank, blk.shape), axis=1)
-            for j in range(a, b):
-                flat[:, j] = marg.marginals_[j].ppf(u[j - a])
-        gen = flat.reshape(args.gen, args.n, f)
-    np.save(f"{args.outdir}/generated_windows.npy", gen)
+    # conditional runs skip the rank-recalibration: it would force every sample
+    # back to the unconditional marginals F_hat_j and erase the regime
+    for lev in (args.gen_cond or [None]):
+        z_gen = sample(ema.shadow, args.gen, args.n, f, nu=marg.nu_,
+                       n_steps=args.ode_steps, mix_dim=args.mix_dim,
+                       device=device, seed=args.seed, cond=lev)
+        gen = marg.inverse_transform(z_gen.numpy())
+        del z_gen
+        if not args.no_recalibrate and lev is None:
+            # rank-recalibration: x -> F_hat_j^{-1}(rank/(K+1)) makes each generated
+            # marginal exactly F_hat_j and leaves the learned copula invariant (Sklar)
+            flat = gen.reshape(-1, f)
+            K = flat.shape[0]
+            rank = np.arange(1, K + 1, dtype=float) / (K + 1.0)
+            for a in range(0, f, 32):                      # column blocks
+                b = min(a + 32, f)
+                blk = np.ascontiguousarray(flat[:, a:b].T)
+                idx = np.argsort(blk, axis=1)
+                u = np.empty(blk.shape)
+                np.put_along_axis(u, idx, np.broadcast_to(rank, blk.shape), axis=1)
+                for j in range(a, b):
+                    flat[:, j] = marg.marginals_[j].ppf(u[j - a])
+            gen = flat.reshape(args.gen, args.n, f)
+        np.save(f"{args.outdir}/generated_windows"
+                f"{'' if lev is None else f'_u{lev:.2f}'}.npy", gen)
 
     print(f"\nSaved: {args.outdir}/{{split.json, generated_windows.npy, "
           f"model_ema.pt, marginals.pkl}}")
