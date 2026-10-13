@@ -76,16 +76,18 @@ def train_cfm(model: VelocityField, data: torch.Tensor, nu: float,
 def sample(model: VelocityField, num: int, n: int, f: int, nu: float,
            n_steps: int = 100, mix_dim: str = "window", device: str = "cpu",
            batch_size: int = 512, seed: int = 0,
-           cond: float | None = None) -> torch.Tensor:
-    """Draw `num` windows by Heun integration of dx/dt = v_theta(x, t), t: 0 -> 1,
-    all at regime value `cond` in [0, 1] (None for an unconditional model)."""
+           cond=None) -> torch.Tensor:
+    """Draw `num` windows by Heun integration of dx/dt = v_theta(x, t), t: 0 -> 1.
+    `cond`: regime u in [0, 1], one value for all windows or an array of `num` values
+    (None for an unconditional model)."""
     torch.manual_seed(seed)
     model = model.to(device).eval()
     out = []
     for start in range(0, num, batch_size):
         b = min(batch_size, num - start)
         x = sample_base(b, n, f, nu, mix_dim=mix_dim, device=device)
-        c = None if cond is None else torch.full((b,), float(cond), device=device)
+        c = None if cond is None else torch.as_tensor(
+            cond, dtype=torch.float32, device=device).expand(num)[start:start + b]
         dt = 1.0 / n_steps
         for k in range(n_steps):
             t0 = torch.full((b, 1, 1), k * dt, device=device)
