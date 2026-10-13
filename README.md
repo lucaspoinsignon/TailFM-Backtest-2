@@ -9,7 +9,14 @@ python cond_check.py --data data/returns_clean.csv --run runs/cond_all
 
 
 
-python cond_check.py --data data/returns_clean.csv --run runs/cond_all --fix runs/cond_all/generated_windows_u0.80.npy
-python run_backtest.py --data data/returns_clean.csv --gen runs/cond_all/generated_windows_u0.80_recal.npy --horizon 1 --cond-band 0.75 0.85
+python train_tailfm.py --data data/returns_clean.csv --outdir runs/cond_multi --train-all --cond-valor 4155001 --gen-cond 0.3 0.6 0.9
+
+python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.30.npy --no-marginals
+python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.60.npy --no-marginals
+python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.90.npy --no-marginals
+
+python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.30.npy --horizon 1 --cond-band 0.25 0.35 --log runs/cond_multi/backtest_u0.30.log
+python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.60.npy --horizon 1 --cond-band 0.55 0.65 --log runs/cond_multi/backtest_u0.60.log
+python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.90.npy --horizon 1 --cond-band 0.85 0.95 --log runs/cond_multi/backtest_u0.90.log
 
 ```
