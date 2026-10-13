@@ -40,6 +40,31 @@ def ewma_sigma(r, lam, init_var, floor_var):
     return np.sqrt(s2)
 
 
+def conditional_recalibrator(model, marg, num, n, f, **kw):
+    """Monotone per-feature map x -> F_hat_j^{-1}(G_j(x)), G_j the marginal of the
+    u ~ U(0, 1) mixture of conditional samples.  u is uniform on the training windows,
+    so that mixture must have the EVT marginals F_hat_j: the map removes the flow's
+    marginal distortion, like the unconditional rank-recalibration, while keeping the
+    copula and the ordering across regimes."""
+    u_mix = (np.arange(num) + 0.5) / num
+    z = sample(model, num, n, f, nu=marg.nu_, cond=u_mix, **kw).numpy()
+    mix = np.sort(marg.inverse_transform(z).reshape(-1, f).astype(np.float32), axis=0)
+    del z
+    K = mix.shape[0]
+    q = np.array([m.ppf(np.array([0.005, 0.995])) for m in marg.marginals_])
+    print(f"flow marginals before recalibration (u-mixture): median ratio of the "
+          f"0.5% / 99.5% quantile to EVT = {np.median(mix[int(0.005 * K)] / q[:, 0]):.3f}"
+          f" / {np.median(mix[int(0.995 * K)] / q[:, 1]):.3f}  (1 = exact)")
+
+    def recal(gen):
+        flat = gen.reshape(-1, f).copy()
+        for j in range(f):
+            p = (np.searchsorted(mix[:, j], flat[:, j]) + 0.5) / (K + 1.0)
+            flat[:, j] = marg.marginals_[j].ppf(p)
+        return flat.reshape(gen.shape)
+    return recal
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="CSV or .npy of shape (T, f)")
@@ -172,8 +197,12 @@ def run(args):
     pickle.dump(marg, open(f"{args.outdir}/marginals.pkl", "wb"))
 
     # --------------------------------------------------------------- sampling
-    # conditional runs skip the rank-recalibration: it would force every sample
-    # back to the unconditional marginals F_hat_j and erase the regime
+    # conditional runs recalibrate through the u-mixture (conditional_recalibrator):
+    # the plain rank-recalibration would force every level to the unconditional F_hat_j
+    recal = (conditional_recalibrator(ema.shadow, marg, args.gen, args.n, f,
+                                      n_steps=args.ode_steps, mix_dim=args.mix_dim,
+                                      device=device, seed=args.seed)
+             if cond is not None and not args.no_recalibrate else None)
     for lev in (args.gen_cond or [None]):
         z_gen = sample(ema.shadow, args.gen, args.n, f, nu=marg.nu_,
                        n_steps=args.ode_steps, mix_dim=args.mix_dim,
@@ -195,6 +224,8 @@ def run(args):
                 for j in range(a, b):
                     flat[:, j] = marg.marginals_[j].ppf(u[j - a])
             gen = flat.reshape(args.gen, args.n, f)
+        elif recal is not None:
+            gen = recal(gen)
         np.save(f"{args.outdir}/generated_windows"
                 f"{'' if lev is None else f'_u{lev:.2f}'}.npy", gen)
 
