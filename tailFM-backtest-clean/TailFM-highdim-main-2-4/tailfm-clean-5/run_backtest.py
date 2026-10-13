@@ -64,6 +64,11 @@ def parse_args():
     ap.add_argument("--power-alt", type=str, default="2,3",
                     help="power of the PF test is reported against true rates that "
                          "are these multiples of p*")
+    ap.add_argument("--cond-band", type=float, nargs=2, default=None,
+                    metavar=("LO", "HI"),
+                    help="keep only the test returns whose first day has regime u in "
+                         "[LO, HI] (cond_u.npy beside --gen, from a --gen-cond run). "
+                         "With a --train-all split, all days are candidates (in-sample)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default=None,
                     help="where the log goes (default: dir of the first --gen)")
@@ -191,13 +196,28 @@ def run(args):
     w = (np.array([float(v) for v in args.weights.split(",")])
          if args.weights else np.full(f, 1.0 / f))
     assert w.size == f, "--weights length must equal the number of features"
+    if args.cond_band:
+        u = np.load(os.path.join(os.path.dirname(os.path.abspath(
+            args.gen[0].rpartition("=")[2])), "cond_u.npy"))
+        lo, hi = args.cond_band
 
     for h in horizons:
         if h > split.block:
             print(f"\n### horizon h={h} skipped: longer than the test block "
                   f"({split.block})")
             continue
-        tw = split.test_windows(r, h)
+        if split.test_starts:
+            tw = split.test_windows(r, h)
+            st = np.array([s + i * h for s in sorted(split.test_starts)
+                           for i in range(split.block // h)])   # same order as tw
+        else:                           # --train-all: in-sample, every h-step return
+            st = np.arange(0, T - h + 1, h)
+            tw = np.stack([r[s:s + h] for s in st])
+        if args.cond_band:
+            keep = (u[st] >= lo) & (u[st] <= hi)
+            tw = tw[keep]
+            print(f"\nregime filter u in [{lo}, {hi}]: kept {int(keep.sum())} of "
+                  f"{keep.size} {h}-step returns")
         x = realized_pnl(tw, w, h)
         print(f"\n\n{'#' * 74}\n### HORIZON h = {h}: {x.size} held-out "
               f"non-overlapping {h}-step returns\n{'#' * 74}")
