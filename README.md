@@ -1,7 +1,8 @@
 ```bash
-python train_tailfm_eps.py --data data/returns_clean.csv --outdir runs/eps_window --mix-dim window --steps 40000 --d-model 768
-python train_tailfm_eps.py --data data/returns_clean.csv --outdir runs/eps_none   --mix-dim none   --steps 40000 --d-model 768
+python train_tailfm.py --data data/returns_clean.csv --outdir runs/cond_all --train-all --cond-valor 1234567 --gen-cond 0.8
 
-python eval_eps.py --data data/returns_clean.csv --gen eps_window=runs/eps_window --gen eps_none=runs/eps_none --orig runs/final3
+python run_backtest.py --data data/returns_clean.csv --gen runs/cond_all/generated_windows_u0.80.npy --horizon 1 --cond-band 0.7 0.9
+
+python evaluate.py --data data/returns_clean.csv --gen runs/cond_all/generated_windows_u0.80.npy --no-marginals
 
 ```
