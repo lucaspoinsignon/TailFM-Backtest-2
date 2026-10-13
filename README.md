@@ -19,4 +19,8 @@ python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/gener
 python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.60.npy --horizon 1 --cond-band 0.55 0.65 --log runs/cond_multi/backtest_u0.60.log
 python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.90.npy --horizon 1 --cond-band 0.85 0.95 --log runs/cond_multi/backtest_u0.90.log
 
+python cond_check.py --data data/returns_clean.csv --run runs/cond_multi --levels 0.3 0.6 0.9 --num 20000 --save
+python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.90.npy --no-marginals
+
+
 ```
