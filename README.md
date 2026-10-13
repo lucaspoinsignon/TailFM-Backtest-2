@@ -5,4 +5,6 @@ python run_backtest.py --data data/returns_clean.csv --gen runs/cond_all/generat
 
 python evaluate.py --data data/returns_clean.csv --gen runs/cond_all/generated_windows_u0.80.npy --no-marginals
 
+python cond_check.py --data data/returns_clean.csv --run runs/cond_all
+
 ```
