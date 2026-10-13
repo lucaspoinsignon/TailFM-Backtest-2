@@ -65,6 +65,27 @@ def conditional_recalibrator(model, marg, num, n, f, **kw):
     return recal
 
 
+def print_regime_periods(dates, u, ref, lev, half=0.05, gap=5, top=8):
+    """The training days whose regime u is within `half` of `lev`, grouped into
+    episodes (band days at most `gap` rows apart are merged)."""
+    lo, hi = max(lev - half, 0.0), min(lev + half, 1.0)
+    idx = np.flatnonzero((u >= lo) & (u <= hi))
+    print(f"regime u = {lev:.2f}: band [{lo:.2f}, {hi:.2f}] = EWMA vol "
+          f"{np.quantile(ref, lo) * 100:.2f}%-{np.quantile(ref, hi) * 100:.2f}%, "
+          f"{idx.size} training days", end="")
+    if idx.size == 0:
+        print()
+        return
+    eps = np.split(idx, np.flatnonzero(np.diff(idx) > gap) + 1)
+    print(f" in {len(eps)} episodes; the {min(top, len(eps))} longest:")
+    for e in sorted(sorted(eps, key=len, reverse=True)[:top], key=lambda e: e[0]):
+        print(f"    {str(dates[e[0]])[:10]} -> {str(dates[e[-1]])[:10]}  "
+              f"({e.size} days in band)")
+    yrs, cnt = np.unique(dates[idx].astype("datetime64[Y]").astype(int) + 1970,
+                         return_counts=True)
+    print("    days per year: " + ", ".join(f"{y}: {c}" for y, c in zip(yrs, cnt)))
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, help="CSV or .npy of shape (T, f)")
@@ -170,6 +191,11 @@ def run(args):
         print(f"condition: EWMA vol of {args.cond_valor} (lambda={args.ewma_lam}); "
               f"sigma at u = 0.1 / 0.5 / 0.9: "
               + " / ".join(f"{np.quantile(ref, q):.4f}" for q in (0.1, 0.5, 0.9)))
+        if not args.data.endswith(".npy"):                   # dates are in the CSV
+            dates = pd.to_datetime(pd.read_csv(args.data, usecols=[0])
+                                   .iloc[-T:, 0]).to_numpy()
+            for lev in args.gen_cond:
+                print_regime_periods(dates[tr], u[tr], ref, lev)
 
     # -------------------------------------------------- EVT marginals + PIT
     # fitted on the training ROWS, not on `real`: windows overlap at stride 1, so
