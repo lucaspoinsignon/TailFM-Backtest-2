@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 
 import numpy as np
 
@@ -87,6 +88,12 @@ def parse_args():
                     help="skip the nearest-neighbour novelty table")
     ap.add_argument("--no-density", action="store_true",
                     help="skip the pooled marginal density figure")
+    ap.add_argument("--cond-band", type=float, nargs=2, default=None,
+                    metavar=("LO", "HI"),
+                    help="score against the real windows whose first day has regime u "
+                         "in [LO, HI] (cond_u.npy beside --gen).  Default for "
+                         "generated_windows_u<U>*.npy files: [U-0.05, U+0.05]; "
+                         "unconditional samples use all training windows")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default=None,
                     help="where the PNGs and the log go (default: dir of the "
@@ -114,6 +121,24 @@ def parse_gens(specs: list[str]) -> dict:
             raise SystemExit(f"{path}: expected (M, n, f), got shape {arr.shape}")
         gens[label] = arr
     return gens
+
+
+def cond_band(args) -> tuple[float, float] | None:
+    """--cond-band, else [U-0.05, U+0.05] when every --gen is a ..._u<U> sample of one
+    level U, else None (unconditional: score against all training windows)."""
+    if args.cond_band:
+        return tuple(args.cond_band)
+    found = [re.search(r"_u(\d*\.\d+)", os.path.basename(s.rpartition("=")[2]))
+             for s in args.gen]
+    levels = {float(m.group(1)) for m in found if m}
+    if levels and (len(levels) > 1 or not all(found)):
+        print("WARNING: the --gen samples mix regimes; scoring against all training "
+              "windows.  Pass --cond-band LO HI to score against one regime.")
+        return None
+    if levels:
+        u0 = levels.pop()
+        return max(u0 - 0.05, 0.0), min(u0 + 0.05, 1.0)
+    return None
 
 
 def run(args):
@@ -144,6 +169,18 @@ def run(args):
                 f"{real.shape[1:]}.  Rerun with matching --n, or pass the "
                 f"split.json the generator was trained with.")
         print(f"  gen[{label}]: {g.shape}")
+
+    # conditional samples are scored against the same regime; novelty keeps every
+    # training window, since a generated window could copy any of them
+    real_all, band = real, cond_band(args)
+    if band:
+        u = np.load(os.path.join(os.path.dirname(os.path.abspath(
+            args.gen[0].rpartition("=")[2])), "cond_u.npy"))
+        keep = (u >= band[0]) & (u <= band[1])
+        real = real[keep[split.train_window_starts(n, args.stride)]]
+        print(f"conditional: real reference = the {real.shape[0]} training windows "
+              f"whose first day has u in [{band[0]:.2f}, {band[1]:.2f}] "
+              f"(novelty: all {real_all.shape[0]})")
 
     w = (np.array([float(v) for v in args.weights.split(",")])
          if args.weights else np.full(f, 1.0 / f))
@@ -199,14 +236,17 @@ def run(args):
 
     # --------------------------------------------------------------- novelty
     if not args.no_novelty:
-        novelty_report(real, gens, train_rows, n_gen=args.n_novelty, seed=args.seed)
+        novelty_report(real_all, gens, train_rows, n_gen=args.n_novelty,
+                       seed=args.seed)
 
     # ---------------------------------------------------------------- figures
     paths = ([] if args.no_figures else
              save_all_figures(real, gens, names, outdir, weights=w, horizon=h,
+                              prefix=f"u{band[0]:.2f}-{band[1]:.2f}_" if band else "",
                               max_pairs=args.max_pairs,
                               pair_select=args.pair_select, seed=args.seed,
-                              real_rows=train_rows, density=not args.no_density,
+                              real_rows=None if band else train_rows,
+                              density=not args.no_density,
                               density_scale=args.density_scale))
     if paths:
         print(f"\nSaved: {outdir}/" + ", ".join(os.path.basename(p) for p in paths))
@@ -217,7 +257,9 @@ def main():
     args = parse_args()
     outdir = args.outdir or os.path.dirname(
         os.path.abspath(args.gen[0].rpartition("=")[2]))
-    log_path = args.log or os.path.join(outdir, "evaluate.log")
+    band = cond_band(args)
+    log_path = args.log or os.path.join(
+        outdir, f"evaluate_u{band[0]:.2f}-{band[1]:.2f}.log" if band else "evaluate.log")
     with tee_output(log_path, header="evaluate.py"):
         run(args)
     print(f"Terminal report saved to {log_path}")
