@@ -7,4 +7,9 @@ python evaluate.py --data data/returns_clean.csv --gen runs/cond_all/generated_w
 
 python cond_check.py --data data/returns_clean.csv --run runs/cond_all
 
+
+
+python cond_check.py --data data/returns_clean.csv --run runs/cond_all --fix runs/cond_all/generated_windows_u0.80.npy
+python run_backtest.py --data data/returns_clean.csv --gen runs/cond_all/generated_windows_u0.80_recal.npy --horizon 1 --cond-band 0.75 0.85
+
 ```
