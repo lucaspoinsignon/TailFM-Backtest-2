@@ -71,13 +71,16 @@ class VelocityField(nn.Module):
 
     def __init__(self, f: int, n_max: int, d_model: int = 512,
                  depth: int = 4, heads: int = 4, mlp_ratio: int = 4,
-                 pos_std: float = 0.1):
+                 pos_std: float = 0.1, cond: bool = False):
         super().__init__()
         self.in_proj = nn.Linear(f, d_model)
         self.pos = nn.Parameter(torch.zeros(1, n_max, d_model))
         nn.init.trunc_normal_(self.pos, std=pos_std)
         self.t_mlp = nn.Sequential(nn.Linear(d_model, d_model), nn.SiLU(),
                                    nn.Linear(d_model, d_model))
+        # scalar regime condition u in [0, 1], embedded like t and added to it
+        self.c_mlp = (nn.Sequential(nn.Linear(d_model, d_model), nn.SiLU(),
+                                    nn.Linear(d_model, d_model)) if cond else None)
         self.blocks = nn.ModuleList(DiTBlock(d_model, heads, mlp_ratio)
                                     for _ in range(depth))
         self.norm_out = nn.LayerNorm(d_model, elementwise_affine=False)
@@ -87,10 +90,14 @@ class VelocityField(nn.Module):
         nn.init.zeros_(self.out_proj.weight);   nn.init.zeros_(self.out_proj.bias)
         self.d_model = d_model
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        """x: (B, n, f); t: (B,) or (B,1,1) in [0,1]. Returns (B, n, f)."""
+    def forward(self, x: torch.Tensor, t: torch.Tensor,
+                cond: torch.Tensor | None = None) -> torch.Tensor:
+        """x: (B, n, f); t: (B,) or (B,1,1) in [0,1]; cond: (B,) in [0,1] or None.
+        Returns (B, n, f)."""
         B, n, _ = x.shape
         c = self.t_mlp(timestep_embedding(t.reshape(B), self.d_model))
+        if cond is not None:
+            c = c + self.c_mlp(timestep_embedding(cond.reshape(B), self.d_model))
         h = self.in_proj(x) + self.pos[:, :n]
         for blk in self.blocks:
             h = blk(h, c)
