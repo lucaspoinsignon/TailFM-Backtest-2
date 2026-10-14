@@ -17,6 +17,7 @@ run_backtest.py, so the held-out rows are never touched at this stage.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pickle
 
@@ -41,19 +42,21 @@ def ewma_sigma(r, lam, init_var, floor_var):
     return np.sqrt(s2)
 
 
-def conditional_recalibrator(model, marg, num, n, f, **kw):
+def conditional_recalibrator(model, marg, num, n, f, pool=None, **kw):
     """Continuous monotone per-feature map z -> phi_j(z) on the flow output, so that
-    the u ~ U(0, 1) mixture of conditional samples has exactly t_nu marginals in
-    z-space, i.e. the EVT marginals F_hat_j after the inverse PIT.  u is uniform on
-    the training windows, so that mixture must have them: the map removes the flow's
-    marginal distortion, like the unconditional rank-recalibration, while keeping
-    the copula and the ordering across regimes.
+    the mixture of conditional samples over the training conditions has exactly t_nu
+    marginals in z-space, i.e. the EVT marginals F_hat_j after the inverse PIT.  That
+    mixture must have them: the map removes the flow's marginal distortion, like the
+    unconditional rank-recalibration, while keeping the copula and the ordering
+    across regimes.  One condition: u ~ U(0, 1), its training distribution.  Several
+    (`pool`, the (N, k) training condition vectors): resampled from `pool`.
 
     phi_j is piecewise linear through (mixture order statistic k, t_nu quantile
     k/(K+1)) and linear beyond the mixture's range, with the slope of its outer 1%:
     both tails are t-like, so the map is asymptotically a rescaling there.  The GPD
     tails of F_hat_j then extrapolate smoothly, with no ties and no cap."""
-    u_mix = (np.arange(num) + 0.5) / num
+    u_mix = ((np.arange(num) + 0.5) / num if pool is None
+             else pool[np.random.default_rng(0).integers(0, len(pool), num)])
     zs = np.sort(sample(model, num, n, f, nu=marg.nu_, cond=u_mix, **kw).numpy()
                  .reshape(-1, f), axis=0)
     K = zs.shape[0]
@@ -147,8 +150,17 @@ def parse_args():
                          "vol of --cond-valor; turns conditioning on and writes one "
                          "generated_windows_u<u>.npy per level.  Omit: unconditional")
     ap.add_argument("--cond-valor", type=str, default=None,
-                    help="VALOR (CSV column name) whose EWMA vol is the regime")
+                    help="VALOR (CSV column name) whose EWMA vol is the regime, or EW "
+                         "for the equal-weight portfolio of all features")
     ap.add_argument("--ewma-lam", type=float, default=0.94)
+    ap.add_argument("--cond-momentum", type=int, default=0, metavar="L",
+                    help="add a second condition: the train percentile of the vol "
+                         "momentum log(sigma_t / sigma_{t-L}).  --gen-cond levels then "
+                         "refer to the first condition, the second is resampled from "
+                         "the training days within 0.05 of each level")
+    ap.add_argument("--oversample", type=float, nargs=2, default=None,
+                    metavar=("Q", "W"),
+                    help="draw the training windows with u >= Q W times as often")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default="runs/final")
     ap.add_argument("--log", type=str, default=None,
@@ -191,15 +203,30 @@ def run(args):
     if args.gen_cond:
         if not args.cond_valor:
             raise SystemExit("--gen-cond needs --cond-valor")
-        rj = r[:, names.index(args.cond_valor)]
+        rj = (r.mean(axis=1) if args.cond_valor == "EW"
+              else r[:, names.index(args.cond_valor)])
         tr = split.train_row_mask()
         sig = ewma_sigma(rj, args.ewma_lam, init_var=rj[tr].var(), floor_var=1e-12)
         ref = np.sort(sig[tr])
         np.save(f"{args.outdir}/cond_sigma_ref.npy", ref)     # u <-> sigma lookup
         u = np.searchsorted(ref, sig, side="right") / ref.size
         np.save(f"{args.outdir}/cond_u.npy", u)              # u of every day, for the backtest
-        cond = torch.tensor(u[split.train_window_starts(args.n, args.stride)],
+        cx = u[:, None]
+        if args.cond_momentum:                               # vol rising or falling
+            L = args.cond_momentum
+            mom = np.log(sig / np.concatenate([np.full(L, sig[0]), sig[:-L]]))
+            mref = np.sort(mom[tr])
+            cx = np.column_stack([u, np.searchsorted(mref, mom, side="right") / mref.size])
+        np.save(f"{args.outdir}/cond_x.npy", cx)             # all conditions, every day
+        starts = split.train_window_starts(args.n, args.stride)
+        cond = torch.tensor(cx[starts] if cx.shape[1] > 1 else u[starts],
                             dtype=torch.float32)
+        weights = None
+        if args.oversample:
+            q, w = args.oversample
+            weights = torch.tensor(np.where(u[starts] >= q, w, 1.0), dtype=torch.float32)
+            print(f"oversampling: the {int((u[starts] >= q).sum())} training windows "
+                  f"with u >= {q} are drawn {w:g}x as often")
         print(f"condition: EWMA vol of {args.cond_valor} (lambda={args.ewma_lam}); "
               f"sigma at u = 0.1 / 0.5 / 0.9: "
               + " / ".join(f"{np.quantile(ref, q):.4f}" for q in (0.1, 0.5, 0.9)))
@@ -226,25 +253,41 @@ def run(args):
     print(f"PIT: max|z| = {np.abs(z.numpy()).max():.1f} (correct fits stay under ~100)")
 
     # --------------------------------------------------------------- training
+    k = 0 if cond is None else (1 if cond.ndim == 1 else cond.shape[1])
+    if k:                       # conditional runs: reproducible initialisation
+        torch.manual_seed(args.seed)
     model = VelocityField(f=f, n_max=args.n, d_model=args.d_model, depth=args.depth,
-                          pos_std=args.pos_std, cond=cond is not None)
+                          pos_std=args.pos_std, cond=k)
     ema, _ = train_cfm(model, z, nu=marg.nu_, steps=args.steps,
                        batch_size=args.batch, mix_dim=args.mix_dim,
-                       device=device, seed=args.seed, cond=cond)
+                       device=device, seed=args.seed, cond=cond,
+                       weights=weights if k else None)
     torch.save(ema.shadow.state_dict(), f"{args.outdir}/model_ema.pt")
+    if k:                       # what cond_check.py needs to rebuild the model
+        json.dump(dict(n=args.n, d_model=args.d_model, depth=args.depth,
+                       pos_std=args.pos_std, cond=k, mix_dim=args.mix_dim,
+                       ode_steps=args.ode_steps, cond_valor=args.cond_valor,
+                       ewma_lam=args.ewma_lam, cond_momentum=args.cond_momentum,
+                       oversample=args.oversample, seed=args.seed),
+                  open(f"{args.outdir}/model_config.json", "w"), indent=2)
     pickle.dump(marg, open(f"{args.outdir}/marginals.pkl", "wb"))
 
     # --------------------------------------------------------------- sampling
     # conditional runs recalibrate through the u-mixture (conditional_recalibrator):
     # the plain rank-recalibration would force every level to the unconditional F_hat_j
-    recal = (conditional_recalibrator(ema.shadow, marg, args.gen, args.n, f,
+    pool = cx[starts] if k > 1 else None
+    recal = (conditional_recalibrator(ema.shadow, marg, args.gen, args.n, f, pool=pool,
                                       n_steps=args.ode_steps, mix_dim=args.mix_dim,
                                       device=device, seed=args.seed)
              if cond is not None and not args.no_recalibrate else None)
     for lev in (args.gen_cond or [None]):
+        c_lev = lev                 # several conditions: resample them near the level
+        if pool is not None:
+            near = np.flatnonzero(np.abs(pool[:, 0] - lev) <= 0.05)
+            c_lev = pool[np.random.default_rng(args.seed).choice(near, args.gen)]
         z_gen = sample(ema.shadow, args.gen, args.n, f, nu=marg.nu_,
                        n_steps=args.ode_steps, mix_dim=args.mix_dim,
-                       device=device, seed=args.seed, cond=lev).numpy()
+                       device=device, seed=args.seed, cond=c_lev).numpy()
         gen = marg.inverse_transform(z_gen if recal is None else recal(z_gen))
         del z_gen
         if not args.no_recalibrate and lev is None:
