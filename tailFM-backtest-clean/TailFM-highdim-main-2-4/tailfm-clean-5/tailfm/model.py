@@ -71,16 +71,18 @@ class VelocityField(nn.Module):
 
     def __init__(self, f: int, n_max: int, d_model: int = 512,
                  depth: int = 4, heads: int = 4, mlp_ratio: int = 4,
-                 pos_std: float = 0.1, cond: bool = False):
+                 pos_std: float = 0.1, cond: int = 0):
         super().__init__()
         self.in_proj = nn.Linear(f, d_model)
         self.pos = nn.Parameter(torch.zeros(1, n_max, d_model))
         nn.init.trunc_normal_(self.pos, std=pos_std)
         self.t_mlp = nn.Sequential(nn.Linear(d_model, d_model), nn.SiLU(),
                                    nn.Linear(d_model, d_model))
-        # scalar regime condition u in [0, 1], embedded like t and added to it
-        self.c_mlp = (nn.Sequential(nn.Linear(d_model, d_model), nn.SiLU(),
-                                    nn.Linear(d_model, d_model)) if cond else None)
+        # `cond` regime variables in [0, 1], each embedded like t, projected jointly
+        # and added to the t-embedding (cond=True means one variable)
+        k = int(cond)
+        self.c_mlp = (nn.Sequential(nn.Linear(k * d_model, d_model), nn.SiLU(),
+                                    nn.Linear(d_model, d_model)) if k else None)
         self.blocks = nn.ModuleList(DiTBlock(d_model, heads, mlp_ratio)
                                     for _ in range(depth))
         self.norm_out = nn.LayerNorm(d_model, elementwise_affine=False)
@@ -92,12 +94,14 @@ class VelocityField(nn.Module):
 
     def forward(self, x: torch.Tensor, t: torch.Tensor,
                 cond: torch.Tensor | None = None) -> torch.Tensor:
-        """x: (B, n, f); t: (B,) or (B,1,1) in [0,1]; cond: (B,) in [0,1] or None.
-        Returns (B, n, f)."""
+        """x: (B, n, f); t: (B,) or (B,1,1) in [0,1]; cond: (B,) or (B, k) in [0,1],
+        or None.  Returns (B, n, f)."""
         B, n, _ = x.shape
         c = self.t_mlp(timestep_embedding(t.reshape(B), self.d_model))
         if cond is not None:
-            c = c + self.c_mlp(timestep_embedding(cond.reshape(B), self.d_model))
+            cond = cond.reshape(B, -1)
+            c = c + self.c_mlp(torch.cat([timestep_embedding(cond[:, i], self.d_model)
+                                          for i in range(cond.shape[1])], dim=-1))
         h = self.in_proj(x) + self.pos[:, :n]
         for blk in self.blocks:
             h = blk(h, c)
