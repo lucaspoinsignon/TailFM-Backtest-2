@@ -94,6 +94,10 @@ def parse_args():
                          "in [LO, HI] (cond_u.npy beside --gen).  Default for "
                          "generated_windows_u<U>*.npy files: [U-0.05, U+0.05]; "
                          "unconditional samples use all training windows")
+    ap.add_argument("--cond-u", type=str, default=None,
+                    help="u file defining --cond-band (default: cond_u.npy beside "
+                         "--gen); pass the baseline's to score every model on the "
+                         "same real days")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default=None,
                     help="where the PNGs and the log go (default: dir of the "
@@ -174,7 +178,7 @@ def run(args):
     # training window, since a generated window could copy any of them
     real_all, band = real, cond_band(args)
     if band:
-        u = np.load(os.path.join(os.path.dirname(os.path.abspath(
+        u = np.load(args.cond_u or os.path.join(os.path.dirname(os.path.abspath(
             args.gen[0].rpartition("=")[2])), "cond_u.npy"))
         keep = (u >= band[0]) & (u <= band[1])
         real = real[keep[split.train_window_starts(n, args.stride)]]
