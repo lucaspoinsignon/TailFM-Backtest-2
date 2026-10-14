@@ -69,6 +69,8 @@ def parse_args():
                     help="keep only the test returns whose first day has regime u in "
                          "[LO, HI] (cond_u.npy beside --gen, from a --gen-cond run). "
                          "With a --train-all split, all days are candidates (in-sample)")
+    ap.add_argument("--cond-u", type=str, default=None,
+                    help="u file defining --cond-band (default: cond_u.npy beside --gen)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default=None,
                     help="where the log goes (default: dir of the first --gen)")
@@ -197,7 +199,7 @@ def run(args):
          if args.weights else np.full(f, 1.0 / f))
     assert w.size == f, "--weights length must equal the number of features"
     if args.cond_band:
-        u = np.load(os.path.join(os.path.dirname(os.path.abspath(
+        u = np.load(args.cond_u or os.path.join(os.path.dirname(os.path.abspath(
             args.gen[0].rpartition("=")[2])), "cond_u.npy"))
         lo, hi = args.cond_band
 
