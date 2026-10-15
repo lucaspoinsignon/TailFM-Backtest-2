@@ -10,6 +10,21 @@ with pooled xi -> PIT to t_nu -> CFM training -> sampling -> inverse PIT -> rank
 recalibration.  Writes split.json, generated_windows.npy, model_ema.pt, marginals.pkl
 and report.log into --outdir.
 
+Training days (default: the original purged random held-out blocks):
+    --train-all                every day
+    --train-period A B ...     only these periods
+    --exclude-period A B ...   every day except these periods (combinable with
+                               --train-period).  Any of the three: no held-out blocks;
+                               choose test days later with run_backtest.py /
+                               evaluate.py --test-period.
+
+Regime conditioning (--gen-cond U ... with --cond-valor V): the flow is conditioned on
+u = train percentile of the EWMA vol of VALOR V on each window's first day.
+--gen-mode point generates every window at u = U (generated_windows_u0.90.npy);
+--gen-mode band draws u uniformly in [U - w/2, U + w/2], w = --band-width
+(generated_windows_u0.85-0.95.npy).  Each sample gets a .json sidecar telling
+evaluate.py / run_backtest.py which real days validate it: the band around U.
+
 Nothing is scored here: diagnostics live in evaluate.py and coverage tests in
 run_backtest.py, so the held-out rows are never touched at this stage.
 """
@@ -22,41 +37,31 @@ import os
 import pickle
 
 import numpy as np
-import pandas as pd
 import torch
 from scipy import stats
 
 from csvio import load_returns, feature_names_from_csv
 from evt_shrink import shrink_ensemble
+from regime import (band_around, describe_ranges, ewma_sigma, load_dates,
+                    mask_to_ranges, period_mask, write_sidecar)
 from run_logging import tee_output
 from splits import add_split_args, build_split
 from tailfm import MarginalEnsemble, VelocityField, train_cfm, sample
 
 
-def ewma_sigma(r, lam, init_var, floor_var):
-    """RiskMetrics EWMA vol; sigma_t uses returns up to t-1, so it is known at t."""
-    s2 = np.empty_like(r)
-    s2[0] = init_var
-    for t in range(1, r.shape[0]):
-        s2[t] = np.maximum(lam * s2[t - 1] + (1 - lam) * r[t - 1] ** 2, floor_var)
-    return np.sqrt(s2)
-
-
-def conditional_recalibrator(model, marg, num, n, f, pool=None, **kw):
+def conditional_recalibrator(model, marg, num, n, f, **kw):
     """Continuous monotone per-feature map z -> phi_j(z) on the flow output, so that
-    the mixture of conditional samples over the training conditions has exactly t_nu
-    marginals in z-space, i.e. the EVT marginals F_hat_j after the inverse PIT.  That
-    mixture must have them: the map removes the flow's marginal distortion, like the
-    unconditional rank-recalibration, while keeping the copula and the ordering
-    across regimes.  One condition: u ~ U(0, 1), its training distribution.  Several
-    (`pool`, the (N, k) training condition vectors): resampled from `pool`.
+    the u ~ U(0, 1) mixture of conditional samples has exactly t_nu marginals in
+    z-space, i.e. the EVT marginals F_hat_j after the inverse PIT.  u is uniform on
+    the training windows, so that mixture must have them: the map removes the flow's
+    marginal distortion, like the unconditional rank-recalibration, while keeping
+    the copula and the ordering across regimes.
 
     phi_j is piecewise linear through (mixture order statistic k, t_nu quantile
     k/(K+1)) and linear beyond the mixture's range, with the slope of its outer 1%:
     both tails are t-like, so the map is asymptotically a rescaling there.  The GPD
     tails of F_hat_j then extrapolate smoothly, with no ties and no cap."""
-    u_mix = ((np.arange(num) + 0.5) / num if pool is None
-             else pool[np.random.default_rng(0).integers(0, len(pool), num)])
+    u_mix = (np.arange(num) + 0.5) / num
     zs = np.sort(sample(model, num, n, f, nu=marg.nu_, cond=u_mix, **kw).numpy()
                  .reshape(-1, f), axis=0)
     K = zs.shape[0]
@@ -78,6 +83,16 @@ def conditional_recalibrator(model, marg, num, n, f, pool=None, **kw):
             flat[:, j] = y
         return flat.reshape(z.shape)
     return recal
+
+
+def generation_plan(level: float, mode: str, width: float, num: int, seed: int):
+    """(cond for sample(), file suffix, sidecar) of one --gen-cond level."""
+    lo, hi = band_around(level, width)
+    meta = dict(mode=mode, level=level, band=[lo, hi], test_period=None)
+    if mode == "point":
+        return level, f"_u{level:.2f}", meta
+    u = lo + (hi - lo) * (np.arange(num) + 0.5) / num          # uniform in the band
+    return np.random.default_rng(seed).permutation(u), f"_u{lo:.2f}-{hi:.2f}", meta
 
 
 def print_regime_periods(dates, u, ref, lev, half=0.05, gap=5, top=8):
@@ -111,13 +126,14 @@ def parse_args():
                     help="risk horizon the held-out blocks are cut for; recorded in "
                          "split.json and reused by evaluate.py / run_backtest.py")
     add_split_args(ap)
-    ap.add_argument("--train-period", nargs=2, action="append", metavar=("START", "END"),
-                    help="restrict training to [START, END] (YYYY-MM-DD); repeat for a union")
-    ap.add_argument("--test-period", nargs=2, action="append", metavar=("START", "END"),
-                    help="test on [START, END] (YYYY-MM-DD); repeat for a union")
     ap.add_argument("--train-all", action="store_true",
-                    help="no held-out blocks: train on every day (the backtest is then "
-                         "in-sample, see run_backtest.py --cond-band)")
+                    help="no held-out blocks: train on every day")
+    ap.add_argument("--train-period", nargs=2, action="append", metavar=("START", "END"),
+                    help="train only on [START, END] (YYYY-MM-DD, inclusive); repeat "
+                         "for a union.  No held-out blocks")
+    ap.add_argument("--exclude-period", nargs=2, action="append", metavar=("START", "END"),
+                    help="leave [START, END] out of training; repeat for several.  "
+                         "No held-out blocks")
     ap.add_argument("--q-tail", type=float, default=0.05,
                     help="EVT threshold quantile, per tail")
     ap.add_argument("--nu", type=float, default=5.0,
@@ -146,21 +162,18 @@ def parse_args():
     ap.add_argument("--no-recalibrate", action="store_true",
                     help="disable rank-recalibration of generated marginals")
     ap.add_argument("--gen-cond", type=float, nargs="+", default=None,
-                    help="regime level(s) u in [0, 1] = train percentile of the EWMA "
+                    help="regime level(s) U in [0, 1] = train percentile of the EWMA "
                          "vol of --cond-valor; turns conditioning on and writes one "
-                         "generated_windows_u<u>.npy per level.  Omit: unconditional")
+                         "sample per level.  Omit: unconditional")
+    ap.add_argument("--gen-mode", default="point", choices=["point", "band"],
+                    help="point: every window at u = U; band: u uniform in "
+                         "[U - w/2, U + w/2] (default point)")
+    ap.add_argument("--band-width", type=float, default=0.1,
+                    help="w: width of the band around U, for --gen-mode band and for "
+                         "the real days that validate either mode (default 0.1)")
     ap.add_argument("--cond-valor", type=str, default=None,
-                    help="VALOR (CSV column name) whose EWMA vol is the regime, or EW "
-                         "for the equal-weight portfolio of all features")
+                    help="VALOR (CSV column name) whose EWMA vol is the regime")
     ap.add_argument("--ewma-lam", type=float, default=0.94)
-    ap.add_argument("--cond-momentum", type=int, default=0, metavar="L",
-                    help="add a second condition: the train percentile of the vol "
-                         "momentum log(sigma_t / sigma_{t-L}).  --gen-cond levels then "
-                         "refer to the first condition, the second is resampled from "
-                         "the training days within 0.05 of each level")
-    ap.add_argument("--oversample", type=float, nargs=2, default=None,
-                    metavar=("Q", "W"),
-                    help="draw the training windows with u >= Q W times as often")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default="runs/final")
     ap.add_argument("--log", type=str, default=None,
@@ -178,18 +191,18 @@ def run(args):
     T, f = r.shape
     names = feature_names_from_csv(args.data, f)
     split = build_split(args, T, data=os.path.abspath(args.data))
-    if args.train_period or args.test_period:
-        dates = pd.to_datetime(pd.read_csv(args.data, usecols=[0]).iloc[-T:, 0])
-        rows = lambda a, b: [int(dates.searchsorted(pd.Timestamp(a))),
-                             int(dates.searchsorted(pd.Timestamp(b), side="right"))]
-        if args.train_period:
-            split.train_ranges = [rows(a, b) for a, b in args.train_period]
-        if args.test_period:
-            split.test_starts = [s for a, b in args.test_period for c, d in [rows(a, b)]
-                                 for s in range(c, d - split.block + 1, split.block)]
-            split.sampling = "dates"
-    if args.train_all:
-        split.test_starts = []
+    dates = None
+    if args.train_all or args.train_period or args.exclude_period:
+        split.test_starts = []                             # no held-out blocks
+    if args.train_period or args.exclude_period:
+        dates = load_dates(args.data, T)
+        keep = (period_mask(dates, args.train_period) if args.train_period
+                else np.ones(T, dtype=bool))
+        if args.exclude_period:
+            keep &= ~period_mask(dates, args.exclude_period)
+        split.train_ranges = mask_to_ranges(keep)
+        print(f"training days: {int(keep.sum())} of {T} "
+              f"({describe_ranges(dates, split.train_ranges)})")
     split.save(f"{args.outdir}/split.json")
     real = split.train_windows(r, args.n, args.stride)
     train_r = split.train_rows(r)
@@ -203,38 +216,22 @@ def run(args):
     if args.gen_cond:
         if not args.cond_valor:
             raise SystemExit("--gen-cond needs --cond-valor")
-        rj = (r.mean(axis=1) if args.cond_valor == "EW"
-              else r[:, names.index(args.cond_valor)])
+        rj = r[:, names.index(args.cond_valor)]
         tr = split.train_row_mask()
         sig = ewma_sigma(rj, args.ewma_lam, init_var=rj[tr].var(), floor_var=1e-12)
         ref = np.sort(sig[tr])
         np.save(f"{args.outdir}/cond_sigma_ref.npy", ref)     # u <-> sigma lookup
         u = np.searchsorted(ref, sig, side="right") / ref.size
-        np.save(f"{args.outdir}/cond_u.npy", u)              # u of every day, for the backtest
-        cx = u[:, None]
-        if args.cond_momentum:                               # vol rising or falling
-            L = args.cond_momentum
-            mom = np.log(sig / np.concatenate([np.full(L, sig[0]), sig[:-L]]))
-            mref = np.sort(mom[tr])
-            cx = np.column_stack([u, np.searchsorted(mref, mom, side="right") / mref.size])
-        np.save(f"{args.outdir}/cond_x.npy", cx)             # all conditions, every day
-        starts = split.train_window_starts(args.n, args.stride)
-        cond = torch.tensor(cx[starts] if cx.shape[1] > 1 else u[starts],
+        np.save(f"{args.outdir}/cond_u.npy", u)              # u of every day
+        cond = torch.tensor(u[split.train_window_starts(args.n, args.stride)],
                             dtype=torch.float32)
-        weights = None
-        if args.oversample:
-            q, w = args.oversample
-            weights = torch.tensor(np.where(u[starts] >= q, w, 1.0), dtype=torch.float32)
-            print(f"oversampling: the {int((u[starts] >= q).sum())} training windows "
-                  f"with u >= {q} are drawn {w:g}x as often")
         print(f"condition: EWMA vol of {args.cond_valor} (lambda={args.ewma_lam}); "
               f"sigma at u = 0.1 / 0.5 / 0.9: "
               + " / ".join(f"{np.quantile(ref, q):.4f}" for q in (0.1, 0.5, 0.9)))
         if not args.data.endswith(".npy"):                   # dates are in the CSV
-            dates = pd.to_datetime(pd.read_csv(args.data, usecols=[0])
-                                   .iloc[-T:, 0]).to_numpy()
+            dates = load_dates(args.data, T) if dates is None else dates
             for lev in args.gen_cond:
-                print_regime_periods(dates[tr], u[tr], ref, lev)
+                print_regime_periods(dates[tr], u[tr], ref, lev, half=args.band_width / 2)
 
     # -------------------------------------------------- EVT marginals + PIT
     # fitted on the training ROWS, not on `real`: windows overlap at stride 1, so
@@ -253,38 +250,34 @@ def run(args):
     print(f"PIT: max|z| = {np.abs(z.numpy()).max():.1f} (correct fits stay under ~100)")
 
     # --------------------------------------------------------------- training
-    k = 0 if cond is None else (1 if cond.ndim == 1 else cond.shape[1])
-    if k:                       # conditional runs: reproducible initialisation
+    if cond is not None:            # conditional runs: reproducible initialisation
         torch.manual_seed(args.seed)
     model = VelocityField(f=f, n_max=args.n, d_model=args.d_model, depth=args.depth,
-                          pos_std=args.pos_std, cond=k)
+                          pos_std=args.pos_std, cond=cond is not None)
     ema, _ = train_cfm(model, z, nu=marg.nu_, steps=args.steps,
                        batch_size=args.batch, mix_dim=args.mix_dim,
-                       device=device, seed=args.seed, cond=cond,
-                       weights=weights if k else None)
+                       device=device, seed=args.seed, cond=cond)
     torch.save(ema.shadow.state_dict(), f"{args.outdir}/model_ema.pt")
-    if k:                       # what cond_check.py needs to rebuild the model
+    if cond is not None:            # what cond_check.py needs to rebuild the model
         json.dump(dict(n=args.n, d_model=args.d_model, depth=args.depth,
-                       pos_std=args.pos_std, cond=k, mix_dim=args.mix_dim,
+                       pos_std=args.pos_std, mix_dim=args.mix_dim,
                        ode_steps=args.ode_steps, cond_valor=args.cond_valor,
-                       ewma_lam=args.ewma_lam, cond_momentum=args.cond_momentum,
-                       oversample=args.oversample, seed=args.seed),
+                       ewma_lam=args.ewma_lam, band_width=args.band_width,
+                       seed=args.seed),
                   open(f"{args.outdir}/model_config.json", "w"), indent=2)
     pickle.dump(marg, open(f"{args.outdir}/marginals.pkl", "wb"))
 
     # --------------------------------------------------------------- sampling
     # conditional runs recalibrate through the u-mixture (conditional_recalibrator):
     # the plain rank-recalibration would force every level to the unconditional F_hat_j
-    pool = cx[starts] if k > 1 else None
-    recal = (conditional_recalibrator(ema.shadow, marg, args.gen, args.n, f, pool=pool,
+    recal = (conditional_recalibrator(ema.shadow, marg, args.gen, args.n, f,
                                       n_steps=args.ode_steps, mix_dim=args.mix_dim,
                                       device=device, seed=args.seed)
              if cond is not None and not args.no_recalibrate else None)
     for lev in (args.gen_cond or [None]):
-        c_lev = lev                 # several conditions: resample them near the level
-        if pool is not None:
-            near = np.flatnonzero(np.abs(pool[:, 0] - lev) <= 0.05)
-            c_lev = pool[np.random.default_rng(args.seed).choice(near, args.gen)]
+        c_lev, suffix, meta = ((None, "", None) if lev is None else
+                               generation_plan(lev, args.gen_mode, args.band_width,
+                                               args.gen, args.seed))
         z_gen = sample(ema.shadow, args.gen, args.n, f, nu=marg.nu_,
                        n_steps=args.ode_steps, mix_dim=args.mix_dim,
                        device=device, seed=args.seed, cond=c_lev).numpy()
@@ -305,8 +298,12 @@ def run(args):
                 for j in range(a, b):
                     flat[:, j] = marg.marginals_[j].ppf(u[j - a])
             gen = flat.reshape(args.gen, args.n, f)
-        np.save(f"{args.outdir}/generated_windows"
-                f"{'' if lev is None else f'_u{lev:.2f}'}.npy", gen)
+        path = f"{args.outdir}/generated_windows{suffix}.npy"
+        np.save(path, gen)
+        if meta:
+            write_sidecar(path, dict(meta, cond_valor=args.cond_valor))
+            print(f"generated {path} ({meta['mode']}, validated on u in "
+                  f"[{meta['band'][0]:.2f}, {meta['band'][1]:.2f}])")
 
     print(f"\nSaved: {args.outdir}/{{split.json, generated_windows.npy, "
           f"model_ema.pt, marginals.pkl}}")
