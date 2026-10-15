@@ -1,11 +1,13 @@
 """Scorecard: several generated samples against the same real days, one table.
 
-    python compare_band.py --data data/returns_clean.csv \\
-        --ref-u runs/exp_base/cond_u.npy --band 0.85 0.95 \\
-        --gen point=runs/exp_base/generated_windows_u0.90.npy \\
-        --gen band=runs/exp_base/generated_windows_match_0.85-0.95.npy ...
+    python compare_band.py --data data/returns_clean.csv --run runs/cond_all \\
+        --cond-band 0.85 0.95 \\
+        --gen point=runs/cond_all/generated_windows_u0.90.npy \\
+        --gen band=runs/cond_all/generated_windows_u0.85-0.95.npy
 
-Real = the windows starting on days whose reference u lies in the band.  Columns:
+Real = the windows starting on the chosen days: --cond-band (u from --run's
+cond_u.npy) and/or --test-period (windows lying inside the periods; any dates).
+Columns:
   CVaR99, CVaR99.5   per-asset 1-day loss CVaR, median over assets of gen / real
   lamL(5%)           lower tail dependence, mean over ALL pairs, 1-day
   rho_S              Spearman correlation, mean over all pairs, 1-day
@@ -16,21 +18,31 @@ import argparse
 import numpy as np
 from scipy.stats import rankdata
 from csvio import load_returns
+from regime import load_dates, period_mask
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--data", required=True)
-ap.add_argument("--ref-u", required=True)
-ap.add_argument("--band", type=float, nargs=2, required=True, metavar=("LO", "HI"))
+ap.add_argument("--run", default=None, help="run whose cond_u.npy defines --cond-band")
+ap.add_argument("--cond-band", type=float, nargs=2, default=None, metavar=("LO", "HI"))
+ap.add_argument("--test-period", nargs=2, action="append", metavar=("START", "END"))
 ap.add_argument("--gen", action="append", required=True, metavar="LABEL=PATH")
 ap.add_argument("--q", type=float, default=0.05, help="tail-dependence quantile")
 a = ap.parse_args()
 
 r = load_returns(a.data, False); T, f = r.shape
-u = np.load(a.ref_u)
 gens = {s.split("=", 1)[0]: np.load(s.split("=", 1)[1]) for s in a.gen}
 n = next(iter(gens.values())).shape[1]
-days = np.flatnonzero((u >= a.band[0]) & (u <= a.band[1]) & (np.arange(T) <= T - n))
-real = np.stack([r[t:t + n] for t in days])
+inside = (period_mask(load_dates(a.data, T), a.test_period) if a.test_period
+          else np.ones(T, dtype=bool))
+c = np.concatenate([[0], np.cumsum(inside)])
+starts = np.arange(T - n + 1)
+starts = starts[c[starts + n] - c[starts] == n]          # whole window inside
+if a.cond_band:
+    if not a.run:
+        raise SystemExit("--cond-band needs --run (for cond_u.npy)")
+    u = np.load(f"{a.run}/cond_u.npy")
+    starts = starts[(u[starts] >= a.cond_band[0]) & (u[starts] <= a.cond_band[1])]
+real = np.stack([r[t:t + n] for t in starts])
 
 
 def cvar(loss, p):                                       # loss (N, ...) -> per column
@@ -58,8 +70,10 @@ def metrics(w):
 
 
 m0 = metrics(real)
-print(f"band [{a.band[0]}, {a.band[1]}]: {days.size} real windows "
-      f"({days.size * n} overlapping days counted once per window start)\n")
+print(f"{starts.size} real windows"
+      + (f" with u in [{a.cond_band[0]}, {a.cond_band[1]}]" if a.cond_band else "")
+      + (" inside " + ", ".join(f"{p} -> {q}" for p, q in a.test_period)
+         if a.test_period else "") + "\n")
 cols = ("CVaR99 CVaR99.5 lamL(5%)  rho_S | 1d VaR99 CVaR99 | 10d VaR95 VaR99 "
         "CVaR95 CVaR99")
 print(f"{'':>12s} {cols}")
