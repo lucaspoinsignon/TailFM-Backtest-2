@@ -28,14 +28,15 @@ The training windows are the purged set in `split.json`, by default the one besi
 from __future__ import annotations
 
 import argparse
+import json
 import os
-import re
 
 import numpy as np
 
 from csvio import load_returns, feature_names_from_csv
 from diagnostics import marginal_pit_report, novelty_report, print_report
 from figures import save_all_figures
+from regime import load_dates, period_mask, read_sidecar, selection_tag
 from run_logging import tee_output
 from splits import add_split_args, add_split_source_args, require_split, Split
 from backtest.risk import estimate_risk, portfolio_losses, var_cvar_empirical
@@ -88,16 +89,15 @@ def parse_args():
                     help="skip the nearest-neighbour novelty table")
     ap.add_argument("--no-density", action="store_true",
                     help="skip the pooled marginal density figure")
+    ap.add_argument("--test-period", nargs=2, action="append", metavar=("START", "END"),
+                    help="score against the real windows lying inside these dates "
+                         "(YYYY-MM-DD, inclusive; repeatable), trained on or not")
     ap.add_argument("--cond-band", type=float, nargs=2, default=None,
                     metavar=("LO", "HI"),
                     help="score against the real windows whose first day has regime u "
-                         "in [LO, HI] (cond_u.npy beside --gen).  Default for "
-                         "generated_windows_u<U>*.npy files: [U-0.05, U+0.05]; "
-                         "unconditional samples use all training windows")
-    ap.add_argument("--cond-u", type=str, default=None,
-                    help="u file defining --cond-band (default: cond_u.npy beside "
-                         "--gen); pass the baseline's to score every model on the "
-                         "same real days")
+                         "in [LO, HI] (cond_u.npy beside --gen)")
+    # default for both: the samples' sidecar .json (how they were generated);
+    # unconditional samples: all training windows, as before
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default=None,
                     help="where the PNGs and the log go (default: dir of the "
@@ -127,22 +127,23 @@ def parse_gens(specs: list[str]) -> dict:
     return gens
 
 
-def cond_band(args) -> tuple[float, float] | None:
-    """--cond-band, else [U-0.05, U+0.05] when every --gen is a ..._u<U> sample of one
-    level U, else None (unconditional: score against all training windows)."""
-    if args.cond_band:
-        return tuple(args.cond_band)
-    found = [re.search(r"_u(\d*\.\d+)", os.path.basename(s.rpartition("=")[2]))
-             for s in args.gen]
-    levels = {float(m.group(1)) for m in found if m}
-    if levels and (len(levels) > 1 or not all(found)):
-        print("WARNING: the --gen samples mix regimes; scoring against all training "
-              "windows.  Pass --cond-band LO HI to score against one regime.")
-        return None
-    if levels:
-        u0 = levels.pop()
-        return max(u0 - 0.05, 0.0), min(u0 + 0.05, 1.0)
-    return None
+def reference_selection(args):
+    """(band, periods) selecting the real reference: the flags, else the samples'
+    sidecars when they all agree, else (None, None) = all training windows."""
+    metas = [read_sidecar(s.rpartition("=")[2]) or {} for s in args.gen]
+
+    def pick(flag, key):
+        if flag:
+            return flag
+        vals = {json.dumps(m.get(key)) for m in metas}
+        if len(vals) > 1:
+            print(f"WARNING: the --gen samples were generated for different {key}s; "
+                  f"pass --{key.replace('_', '-')} to choose one")
+            return None
+        return metas[0].get(key)
+
+    return (pick(args.cond_band, "band"),
+            pick(args.test_period and [list(p) for p in args.test_period], "test_period"))
 
 
 def run(args):
@@ -174,17 +175,31 @@ def run(args):
                 f"split.json the generator was trained with.")
         print(f"  gen[{label}]: {g.shape}")
 
-    # conditional samples are scored against the same regime; novelty keeps every
-    # training window, since a generated window could copy any of them
-    real_all, band = real, cond_band(args)
-    if band:
-        u = np.load(args.cond_u or os.path.join(os.path.dirname(os.path.abspath(
-            args.gen[0].rpartition("=")[2])), "cond_u.npy"))
-        keep = (u >= band[0]) & (u <= band[1])
-        real = real[keep[split.train_window_starts(n, args.stride)]]
-        print(f"conditional: real reference = the {real.shape[0]} training windows "
-              f"whose first day has u in [{band[0]:.2f}, {band[1]:.2f}] "
-              f"(novelty: all {real_all.shape[0]})")
+    # conditional samples / test periods are scored against the matching real
+    # windows; novelty keeps every training window, since a generated window could
+    # copy any of them
+    real_all, (band, periods) = real, args.selection
+    if band or periods:
+        if periods:                     # windows lying entirely inside the periods
+            c = np.concatenate([[0], np.cumsum(period_mask(load_dates(args.data, T),
+                                                           periods))])
+            starts = np.arange(T - n + 1)
+            starts = starts[c[starts + n] - c[starts] == n]
+        else:
+            starts = split.train_window_starts(n, args.stride)
+        if band:
+            u = np.load(os.path.join(os.path.dirname(os.path.abspath(
+                args.gen[0].rpartition("=")[2])), "cond_u.npy"))
+            starts = starts[(u[starts] >= band[0]) & (u[starts] <= band[1])]
+        if starts.size == 0:
+            raise SystemExit("no real window matches the test period / band")
+        real = np.stack([r[s:s + n] for s in starts])
+        share = split.train_row_mask()[starts].mean()
+        print(f"reference: the {real.shape[0]} real windows "
+              + (f"inside {', '.join(f'{a} -> {b}' for a, b in periods)} " if periods else "")
+              + (f"whose first day has u in [{band[0]:.2f}, {band[1]:.2f}] " if band else "")
+              + f"({share:.0%} start on training days; novelty: all "
+              f"{real_all.shape[0]} training windows)")
 
     w = (np.array([float(v) for v in args.weights.split(",")])
          if args.weights else np.full(f, 1.0 / f))
@@ -246,10 +261,11 @@ def run(args):
     # ---------------------------------------------------------------- figures
     paths = ([] if args.no_figures else
              save_all_figures(real, gens, names, outdir, weights=w, horizon=h,
-                              prefix=f"u{band[0]:.2f}-{band[1]:.2f}_" if band else "",
+                              prefix=(selection_tag(band, periods) + "_"
+                                      if band or periods else ""),
                               max_pairs=args.max_pairs,
                               pair_select=args.pair_select, seed=args.seed,
-                              real_rows=None if band else train_rows,
+                              real_rows=None if band or periods else train_rows,
                               density=not args.no_density,
                               density_scale=args.density_scale))
     if paths:
@@ -261,9 +277,10 @@ def main():
     args = parse_args()
     outdir = args.outdir or os.path.dirname(
         os.path.abspath(args.gen[0].rpartition("=")[2]))
-    band = cond_band(args)
+    args.selection = reference_selection(args)
+    tag = selection_tag(*args.selection)
     log_path = args.log or os.path.join(
-        outdir, f"evaluate_u{band[0]:.2f}-{band[1]:.2f}.log" if band else "evaluate.log")
+        outdir, f"evaluate_{tag}.log" if tag else "evaluate.log")
     with tee_output(log_path, header="evaluate.py"):
         run(args)
     print(f"Terminal report saved to {log_path}")
