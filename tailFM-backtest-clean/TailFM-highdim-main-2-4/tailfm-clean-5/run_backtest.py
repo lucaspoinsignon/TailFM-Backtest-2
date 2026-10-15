@@ -27,6 +27,7 @@ import os
 import numpy as np
 
 from csvio import load_returns
+from regime import block_starts, load_dates, period_mask, read_sidecar
 from run_logging import tee_output
 from splits import add_split_args, add_split_source_args, require_split, Split
 from backtest import (predictive_from_windows, realized_pnl, pf_test, tuff_test,
@@ -64,13 +65,15 @@ def parse_args():
     ap.add_argument("--power-alt", type=str, default="2,3",
                     help="power of the PF test is reported against true rates that "
                          "are these multiples of p*")
+    ap.add_argument("--test-period", nargs=2, action="append", metavar=("START", "END"),
+                    help="test on these dates (YYYY-MM-DD, inclusive; repeatable), "
+                         "trained on or not.  Default: the sidecar's periods, else the "
+                         "split's held-out blocks, else every day")
     ap.add_argument("--cond-band", type=float, nargs=2, default=None,
                     metavar=("LO", "HI"),
                     help="keep only the test returns whose first day has regime u in "
-                         "[LO, HI] (cond_u.npy beside --gen, from a --gen-cond run). "
-                         "With a --train-all split, all days are candidates (in-sample)")
-    ap.add_argument("--cond-u", type=str, default=None,
-                    help="u file defining --cond-band (default: cond_u.npy beside --gen)")
+                         "[LO, HI] (cond_u.npy beside --gen).  Default: the band in the "
+                         "sidecar .json of the first --gen, i.e. how it was generated")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default=None,
                     help="where the log goes (default: dir of the first --gen)")
@@ -198,28 +201,54 @@ def run(args):
     w = (np.array([float(v) for v in args.weights.split(",")])
          if args.weights else np.full(f, 1.0 / f))
     assert w.size == f, "--weights length must equal the number of features"
-    if args.cond_band:
-        u = np.load(args.cond_u or os.path.join(os.path.dirname(os.path.abspath(
-            args.gen[0].rpartition("=")[2])), "cond_u.npy"))
-        lo, hi = args.cond_band
+    # ------------------------------------------------------------ test days
+    # explicit flags > the first sample's sidecar (how it was generated) > the split
+    gen0 = args.gen[0].rpartition("=")[2]
+    meta = read_sidecar(gen0) or {}
+    band = args.cond_band or meta.get("band")
+    periods = args.test_period or meta.get("test_period")
+    if band:
+        u = np.load(os.path.join(os.path.dirname(os.path.abspath(gen0)), "cond_u.npy"))
+    cand = None                         # None: the split's held-out blocks
+    if periods:
+        cand = period_mask(load_dates(args.data, T), periods)
+    elif not split.test_starts:
+        cand = np.ones(T, dtype=bool)
+    if periods or band:
+        print("test days: " + (", ".join(f"{a} -> {b}" for a, b in periods)
+                               if periods else "split default")
+              + (f", regime u in [{band[0]:.2f}, {band[1]:.2f}]" if band else "")
+              + ("" if args.test_period or args.cond_band else
+                 "  (from the sidecar of the first --gen)"))
+    train_mask = split.train_row_mask()
 
     for h in horizons:
-        if h > split.block:
-            print(f"\n### horizon h={h} skipped: longer than the test block "
-                  f"({split.block})")
-            continue
-        if split.test_starts:
+        if cand is None:
+            if h > split.block:
+                print(f"\n### horizon h={h} skipped: longer than the test block "
+                      f"({split.block})")
+                continue
             tw = split.test_windows(r, h)
             st = np.array([s + i * h for s in sorted(split.test_starts)
                            for i in range(split.block // h)])   # same order as tw
-        else:                           # --train-all: in-sample, every h-step return
-            st = np.arange(0, T - h + 1, h)
+        else:                           # non-overlapping h-blocks inside the test days
+            st = block_starts(cand, h)
+            if st.size == 0:
+                print(f"\n### horizon h={h} skipped: no {h}-day block in the test days")
+                continue
             tw = np.stack([r[s:s + h] for s in st])
-        if args.cond_band:
-            keep = (u[st] >= lo) & (u[st] <= hi)
-            tw = tw[keep]
-            print(f"\nregime filter u in [{lo}, {hi}]: kept {int(keep.sum())} of "
-                  f"{keep.size} {h}-step returns")
+        if band:
+            keep = (u[st] >= band[0]) & (u[st] <= band[1])
+            tw, st = tw[keep], st[keep]
+            print(f"\nregime filter u in [{band[0]:.2f}, {band[1]:.2f}]: kept "
+                  f"{int(keep.sum())} of {keep.size} {h}-step returns")
+            if not keep.any():
+                print(f"### horizon h={h} skipped: no test return in the band")
+                continue
+        if cand is not None or band:
+            share = train_mask[(st[:, None] + np.arange(h)).ravel()].mean()
+            print(f"test days that were also training days: {share:.0%}"
+                  f"{'  (in-sample)' if share > 0 else '  (out-of-sample)'}")
         x = realized_pnl(tw, w, h)
         print(f"\n\n{'#' * 74}\n### HORIZON h = {h}: {x.size} held-out "
               f"non-overlapping {h}-step returns\n{'#' * 74}")
