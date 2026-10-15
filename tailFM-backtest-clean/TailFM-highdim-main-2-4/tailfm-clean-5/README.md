@@ -1,74 +1,84 @@
-# TailFM
-
-Tail-aware flow matching for multivariate return generation, targeted at VaR / CVaR.
+# TailFM conditional — commands
 
 ```bash
-pip install numpy pandas scipy matplotlib torch
+A="--data data/returns_clean.csv --cond-valor 4155001 --steps 40000 --d-model 768"
+D="--data data/returns_clean.csv"
 ```
 
-## 1. Data
+## Train
 
 ```bash
-python 01_panel.py    --raw data/raw.csv --out data/prices.csv --currency USD
-python 02_returns.py  --data data/prices.csv --out data/returns.csv
-python check.py       --data data/returns.csv
-python drop_valors.py --data data/returns.csv --out data/returns_clean.csv \
-    --valors 4155686,4155690,4157124
+# unconditional (original): no --gen-cond
+python train_tailfm.py $D --steps 40000 --d-model 768 --outdir runs/uncond
+
+# conditional: --gen-cond with the u value(s) you choose
+python train_tailfm.py $A --train-all --gen-cond 0.75 --outdir runs/u075
+
+# all days
+python train_tailfm.py $A --train-all --gen-cond 0.3 0.6 0.9 --outdir runs/all
+
+# only a period
+python train_tailfm.py $A --train-period 2005-01-01 2015-12-31 --gen-cond 0.9 --outdir runs/p0515
+
+# everything except a period
+python train_tailfm.py $A --exclude-period 2020-01-01 2020-12-31 --gen-cond 0.9 --outdir runs/ex2020
+
+# a period minus a sub-period
+python train_tailfm.py $A --train-period 2005-01-01 2019-12-31 --exclude-period 2008-01-01 2008-12-31 --gen-cond 0.9 --outdir runs/p0519_ex08
+
+# band generation instead of point (default point)
+python train_tailfm.py $A --train-all --gen-cond 0.9 --gen-mode band --outdir runs/all_band
+python train_tailfm.py $A --train-all --gen-cond 0.9 --gen-mode band --band-width 0.2 --outdir runs/all_band20
 ```
 
-## 2. Plots
+## Regenerate from a saved model (no retraining)
 
 ```bash
-python 03_plot.py    --data data/returns.csv --out fig/returns.png
-python 04_analyse.py --data data/returns.csv --out fig/dependence.png
+# other levels, point / band
+python cond_check.py $D --run runs/all --levels 0.5 0.8 --num 20000 --save
+python cond_check.py $D --run runs/all --levels 0.5 0.8 --mode band --num 20000 --save
+
+# matched to test days: a band (in-sample)
+python cond_check.py $D --run runs/all --match --cond-band 0.85 0.95 --num 20000 --save
+
+# matched to test days: a left-out period (out-of-sample)
+python cond_check.py $D --run runs/ex2020 --match --test-period 2020-01-01 2020-12-31 --num 20000 --save
+
+# matched to test days: a left-out period and a band
+python cond_check.py $D --run runs/ex2020 --match --test-period 2020-01-01 2020-12-31 --cond-band 0.85 1.0 --num 20000 --save
 ```
 
-## 3. Train and generate
+## Backtest (test days and band default to the sample's .json)
 
 ```bash
-python train_tailfm.py --data data/returns_clean.csv --outdir runs/final
+python run_backtest.py $D --gen runs/all/generated_windows_u0.90.npy --horizon 1 --log runs/all/bt_u0.90.log
+python run_backtest.py $D --gen runs/all/generated_windows_match_u0.85-0.95.npy --horizon 1 --log runs/all/bt_band.log
+python run_backtest.py $D --gen runs/ex2020/generated_windows_match_2020-01-01_2020-12-31.npy --horizon 1 --log runs/ex2020/bt_2020.log
+
+# explicit test period / band (override the .json; --cond-band 0 1 removes the band)
+python run_backtest.py $D --gen runs/ex2020/generated_windows_u0.90.npy --test-period 2020-01-01 2020-12-31 --cond-band 0.85 0.95 --horizon 1 --log runs/ex2020/bt_u0.90_2020.log
+
+# unconditional
+python run_backtest.py $D --gen runs/uncond/generated_windows.npy --horizon 1
 ```
 
-Defaults: `--nu 5 --q-tail 0.05 --pos-std 0.1 --n 24 --test-frac 0.2 --horizon 10
---steps 20000 --gen 20000 --d-model 512 --ode-steps 100`. Writes `split.json`,
-`generated_windows.npy`, `model_ema.pt`, `marginals.pkl` and `report.log` into
-`--outdir`.
-
-## 4. Evaluate
+## Evaluate (--no-marginals for runs without held-out blocks)
 
 ```bash
-python evaluate.py --data data/returns_clean.csv --gen runs/final/generated_windows.npy
+python evaluate.py $D --gen runs/all/generated_windows_u0.90.npy --no-marginals
+python evaluate.py $D --gen runs/ex2020/generated_windows_match_2020-01-01_2020-12-31.npy --no-marginals
+python evaluate.py $D --gen runs/ex2020/generated_windows_u0.90.npy --test-period 2020-01-01 2020-12-31 --no-marginals
+python evaluate.py $D --gen runs/uncond/generated_windows.npy
 ```
 
-Several generators at once:
+## Scorecard (several samples, same real days)
 
 ```bash
-python evaluate.py --data data/returns_clean.csv --split runs/final/split.json \
-    --gen tailfm=runs/final/generated_windows.npy \
-    --gen timevae=runs/baselines/gen_timevae.npy \
-    --outdir runs/compare --pair-select spread
-```
+python compare_band.py $D --run runs/all --cond-band 0.85 0.95 \
+  --gen point=runs/all/generated_windows_u0.90.npy \
+  --gen band=runs/all_band/generated_windows_u0.85-0.95.npy \
+  --gen match=runs/all/generated_windows_match_u0.85-0.95.npy
 
-## 5. Backtest
-
-```bash
-python run_backtest.py --data data/returns_clean.csv --gen runs/final/generated_windows.npy
-python run_backtest.py --self-test
-```
-
-## 6. Baselines
-
-```bash
-python run_baselines.py --data data/returns_clean.csv \
-    --split runs/final/split.json \
-    --tailfm-gen runs/final/generated_windows.npy --outdir runs/baselines
-```
-
-## 7. Compare runs
-
-```bash
-python summarize_runs.py --data data/returns_clean.csv --split runs/final/split.json \
-    runs/final runs/other
-python 06_compare.py --data data/returns_clean.csv --split runs/final/split.json \
-    --run runs/final --dim 3
+python compare_band.py $D --run runs/ex2020 --test-period 2020-01-01 2020-12-31 --cond-band 0.85 1.0 \
+  --gen match=runs/ex2020/generated_windows_match_u0.85-1.00_2020-01-01_2020-12-31.npy
 ```
