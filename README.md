@@ -45,4 +45,14 @@ python compare_band.py --data data/returns_clean.csv --ref-u runs/exp_base/cond_
   --gen point=runs/exp_base/generated_windows_u0.90.npy --gen band=runs/exp_base/$M \
   --gen seed1=runs/exp_base_s1/$M --gen momentum=runs/exp_mom/$M \
   --gen oversample=runs/exp_over/$M --gen ew_vol=runs/exp_ew/$M
+
+python make_folds.py --run runs/u090 --band 0.87 0.93 --k 5
+
+nohup bash folds.sh > folds.out 2>&1 &
+tail -f folds.out
+
+
+python pooled_ci.py                                                # main result: every band day out-of-sample
+python pooled_ci.py --same runs/u090/generated_windows_u0.90.npy   # same periods, scored by the in-sample model
+python pooled_ci.py --level 0.80                                   # wrong-regime check, out-of-sample
 ```
