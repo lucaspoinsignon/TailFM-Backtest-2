@@ -55,4 +55,10 @@ tail -f folds.out
 python pooled_ci.py                                                # main result: every band day out-of-sample
 python pooled_ci.py --same runs/u090/generated_windows_u0.90.npy   # same periods, scored by the in-sample model
 python pooled_ci.py --level 0.80                                   # wrong-regime check, out-of-sample
+
+   python -c "import numpy as np; [print(k, round(100 * np.quantile(np.load(f'runs/{k}/cond_sigma_ref.npy'), 0.9), 3)) for k in ['u090', 'fold1', 'fold2', 'fold3', 'fold4', 'fold5']]"
+
+python pooled_ci.py                                                # centred c-scan, all 409 days
+python pooled_ci.py --same runs/u090/generated_windows_u0.90.npy   # same periods, in-sample model
+python pooled_ci.py --level 0.80                                   # wrong-regime check
 ```
