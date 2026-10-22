@@ -5,18 +5,23 @@
     python evaluate.py ... --gen runs/u090/generated_windows_u0.90.npy --no-band
     python evaluate.py ... --gen runs/u090/generated_windows_u0.90.npy --cond-band 0.87 0.93
 
-Reference = the real windows the sample is compared with:
-    default            the training windows; for a conditional sample only those whose
-                       first day has u in the sample's band (its .json sidecar)
-    --no-band          every training window, whatever the regime (entire dataset for a
+Horizon: everything compares the first --horizon days of each window (default 1, the
+day the regime u describes and the day the backtest scores): the report, the figures,
+the VaR/CVaR table and the portfolio loss survival use h-day returns / losses.
+--horizon 24 compares whole windows.  Only the novelty check keeps whole windows.
+
+Reference = the real h-day periods the sample is compared with:
+    default            the training days; for a conditional sample only those with u in
+                       the sample's band (its .json sidecar)
+    --no-band          every training day, whatever the regime (entire dataset for a
                        --train-all run)
-    --cond-level U     windows whose first day has u in [U - 0.03, U + 0.03]
-    --cond-band LO HI  windows whose first day has u in [LO, HI]
-    --holdout          windows lying in the days the run was not trained on (band
-                       hold-out, --exclude-period, held-out blocks)
-    --test-period A B  windows inside these dates, trained on or not (repeatable)
-    --exclude-period A B   drop the windows touching these dates (repeatable)
-The flags combine.
+    --cond-level U     days with u in [U - 0.03, U + 0.03]
+    --cond-band LO HI  days with u in [LO, HI]
+    --holdout          days the run was not trained on (band hold-out,
+                       --exclude-period, held-out blocks)
+    --test-period A B  days inside these dates, trained on or not (repeatable)
+    --exclude-period A B   drop the days in these dates (repeatable)
+The flags combine; for h > 1 a period is the h days starting on the selected day.
 
 Six sections, each with a --no-* flag:
 
@@ -28,10 +33,10 @@ Six sections, each with a --no-* flag:
     density           pooled marginal KDE, real vs generated
     figures           QQ, tail dependence, per-feature densities, portfolio survival
 
-Everything comparing real with generated is scored against the TRAINING windows, the
-target distribution for a scenario generator; whether that law extends out of sample
-is run_backtest.py.  The marginal PIT section is the exception -- it needs held-out
-rows, and it tests F_hat_j alone, never the generated windows.
+By default the reference is the TRAINING days, the target distribution of a scenario
+generator; --holdout / --test-period score days the run did not train on.  Coverage
+tests are run_backtest.py.  The marginal PIT section always uses the held-out rows of
+the split, and it tests F_hat_j alone, never the generated windows.
 
 The training windows are the purged set in `split.json`, by default the one beside
 --gen.  Compare several generators by repeating --gen, optionally with a label:
@@ -66,9 +71,9 @@ def parse_args():
     ap.add_argument("--prices", action="store_true", help="input is prices, not returns")
     ap.add_argument("--n", type=int, default=24, help="window length")
     ap.add_argument("--stride", type=int, default=1)
-    ap.add_argument("--horizon", type=int, default=None,
-                    help="risk horizon of the VaR/CVaR table and figures "
-                         "(default: the split's)")
+    ap.add_argument("--horizon", type=int, default=1,
+                    help="compare the first h days of each window: report, figures, "
+                         "VaR/CVaR table, portfolio loss (default 1)")
     add_split_args(ap)
     add_split_source_args(ap)
     ap.add_argument("--alphas", type=str, default="0.95,0.99,0.995",
@@ -107,9 +112,9 @@ def parse_args():
                     help="skip the nearest-neighbour novelty table")
     ap.add_argument("--no-density", action="store_true",
                     help="skip the pooled marginal density figure")
-    # reference windows; default: the samples' sidecar .json (how they were generated),
-    # unconditional samples: all training windows
-    add_selection_args(ap, "real windows")
+    # reference days; default: the samples' sidecar .json (how they were generated),
+    # unconditional samples: all training days
+    add_selection_args(ap, "real days")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--outdir", type=str, default=None,
                     help="where the PNGs and the log go (default: dir of the "
@@ -137,7 +142,6 @@ def parse_gens(specs: list[str]) -> dict:
             raise SystemExit(f"{path}: expected (M, n, f), got shape {arr.shape}")
         gens[label] = arr
     return gens
-
 
 
 def run(args):
@@ -169,37 +173,36 @@ def run(args):
                 f"split.json the generator was trained with.")
         print(f"  gen[{label}]: {g.shape}")
 
-    # conditional samples / test periods are scored against the matching real
-    # windows; novelty keeps every training window, since a generated window could
-    # copy any of them
+    # the first h days of the generated windows against the matching real h-day periods;
+    # novelty keeps every whole training window, since a generated window could copy any
+    h = args.horizon
+    if not 1 <= h <= n:
+        raise SystemExit(f"--horizon must be in [1, {n}]")
     real_all, (periods, excluded, band, holdout) = real, args.selection
+    u = (np.load(os.path.join(os.path.dirname(os.path.abspath(
+        args.gen[0].rpartition("=")[2])), "cond_u.npy")) if band else None)
+    dates = load_dates(args.data, T) if periods or excluded else None
+    starts = real_window_starts(split, h, args.stride, dates, periods, excluded,
+                                band, u, holdout)
+    if starts.size == 0:
+        raise SystemExit("no real day matches the selection")
+    real = np.stack([r[s:s + h] for s in starts])
+    gens_full, gens = gens, {k: g[:, :h] for k, g in gens.items()}
     selected = bool(band or periods or excluded or holdout)
-    if selected:
-        u = (np.load(os.path.join(os.path.dirname(os.path.abspath(
-            args.gen[0].rpartition("=")[2])), "cond_u.npy")) if band else None)
-        dates = load_dates(args.data, T) if periods or excluded else None
-        starts = real_window_starts(split, n, args.stride, dates, periods, excluded,
-                                    band, u, holdout)
-        if starts.size == 0:
-            raise SystemExit("no real window matches the selection")
-        real = np.stack([r[s:s + n] for s in starts])
-        share = split.train_row_mask()[starts].mean()
-        print(f"reference: the {real.shape[0]} real windows, "
-              f"{describe_selection(periods, excluded, band, holdout)} "
-              f"({share:.0%} start on training days; novelty: all "
-              f"{real_all.shape[0]} training windows)")
-    else:
-        print(f"reference: all {real.shape[0]} training windows")
+    share = split.train_row_mask()[starts].mean()
+    print(f"horizon h={h}: first {h} day(s) of each generated window vs {real.shape[0]} "
+          f"real {h}-day periods, {describe_selection(periods, excluded, band, holdout)} "
+          f"({share:.0%} on training days; novelty: all {real_all.shape[0]} whole "
+          f"training windows)")
 
     w = (np.array([float(v) for v in args.weights.split(",")])
          if args.weights else np.full(f, 1.0 / f))
     assert w.size == f, "--weights length must equal the number of features"
-    h = args.horizon or split.horizon
 
     # ------------------------------------------------------------ diagnostics
     if not args.no_report:
         for label, g in gens.items():
-            print(f"\n{'#' * 20} diagnostics: {label} vs real (train) {'#' * 20}")
+            print(f"\n{'#' * 20} diagnostics: {label} vs real, h={h} {'#' * 20}")
             print_report(real, g, feature_names=names, max_pairs=args.max_pairs)
 
     # ------------------------------------------------------------ risk report
@@ -207,9 +210,8 @@ def run(args):
     # error in the M generated windows only.  Coverage testing is run_backtest.py.
     if not args.no_risk:
         L_real = portfolio_losses(real, weights=w, horizon=h)
-        print(f"\n=== Portfolio VaR/CVaR of the h={h} loss "
-              f"(generated law; real train sample for scale, N={L_real.size} "
-              f"overlapping windows) ===")
+        print(f"\n=== Portfolio VaR/CVaR of the h={h} loss (generated law vs the "
+              f"{L_real.size} real {h}-day losses of the reference) ===")
         for label, g in gens.items():
             rep = estimate_risk(g, alphas=alphas, weights=w, horizon=h,
                                 n_boot=args.n_boot, seed=args.seed)
@@ -248,17 +250,18 @@ def run(args):
 
     # --------------------------------------------------------------- novelty
     if not args.no_novelty:
-        novelty_report(real_all, gens, train_rows, n_gen=args.n_novelty,
+        novelty_report(real_all, gens_full, train_rows, n_gen=args.n_novelty,
                        seed=args.seed)
 
     # ---------------------------------------------------------------- figures
     paths = ([] if args.no_figures else
              save_all_figures(real, gens, names, outdir, weights=w, horizon=h,
-                              prefix=(selection_tag(band, periods, excluded, holdout) + "_"
-                                      if selected else ""),
+                              prefix=(f"h{h}_" + (selection_tag(band, periods, excluded,
+                                                                  holdout) + "_"
+                                                    if selected else "")),
                               max_pairs=args.max_pairs,
                               pair_select=args.pair_select, seed=args.seed,
-                              real_rows=None if selected else train_rows,
+                              real_rows=None,
                               density=not args.no_density,
                               density_scale=args.density_scale))
     if paths:
@@ -275,7 +278,7 @@ def main():
     periods, excluded, band, holdout = args.selection
     tag = selection_tag(band, periods, excluded, holdout)
     log_path = args.log or os.path.join(
-        outdir, f"evaluate_{tag}.log" if tag else "evaluate.log")
+        outdir, f"evaluate_h{args.horizon}" + (f"_{tag}" if tag else "") + ".log")
     with tee_output(log_path, header="evaluate.py"):
         run(args)
     print(f"Terminal report saved to {log_path}")
