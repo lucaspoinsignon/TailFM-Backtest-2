@@ -183,6 +183,9 @@ def print_report(real: np.ndarray, gen: np.ndarray, feature_names=None,
                   f"  |  CVaR real {cr:8.4f} gen {cg:8.4f}")
 
     print("\n=== ACF (lag 1..5), squared series: volatility clustering ===")
+    if real.shape[1] < 7 or gen.shape[1] < 7:
+        print("  skipped: needs windows of at least 7 days (evaluate.py --horizon)")
+        return
     for j in range(f):
         ar = acf(real[:, :, j] ** 2, 5); ag = acf(gen[:, :, j] ** 2, 5)
         print(f"  {names[j]:>8s} sq-ACF real {np.round(ar, 2)}  gen {np.round(ag, 2)}")
