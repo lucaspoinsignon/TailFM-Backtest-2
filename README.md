@@ -27,10 +27,7 @@ python generate.py --data data/returns_clean.csv --run runs/u090 --levels 0.9 --
 python generate.py --data data/returns_clean.csv --run runs/u090 --levels 0.9 --no-save --no-recalibrate
 
 
-for k in 1 2 3 4 5; do mkdir -p runs/fold${k}_norecal && cp runs/fold${k}/{split.json,model_ema.pt,model_config.json,marginals.pkl,cond_u.npy,cond_sigma_ref.npy} runs/fold${k}_norecal/ && python generate.py --data data/returns_clean.csv --run runs/fold${k}_norecal --levels 0.9 --no-recalibrate; done
-sed 's#"runs/fold\([0-9]*\)"#"runs/fold\1_norecal"#' folds.json > folds_norecal.json
-python pooled_ci.py --folds folds_norecal.json
-python pooled_ci.py
+python evaluate.py --data data/returns_clean.csv --gen runs/u090/generated_windows_u0.90.npy --cond-level 0.9 --no-figures --no-novelty --no-report --weights $(python -c "print(','.join(['-0.00404858'] * 247))") --log runs/u090/evaluate_h1_short.log
 
 
 ```
