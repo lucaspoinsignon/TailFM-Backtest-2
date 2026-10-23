@@ -33,5 +33,8 @@ python momentum/generate_mom.py --data data/returns_clean.csv --run runs/ho090 -
 
 python momentum/backtest_mom.py --data data/returns_clean.csv --run level=runs/ho090 --run momentum=runs/ho090_mom --holdout --cond-level 0.9 --direction all rising falling
 
+python momentum/generate_mom.py --data data/returns_clean.csv --run runs/ho090_mom --cond-level 0.9 --direction rising falling --no-save
+python momentum/generate_mom.py --data data/returns_clean.csv --run runs/ho090 --cond-level 0.9 --direction rising falling --no-save
+
 
 ```
