@@ -40,11 +40,4 @@ python evaluate.py --data data/returns_clean.csv --gen runs/uncond/generated_win
 
 
 
-
-
-grep -m1 "step" runs/u090/report.log
-grep d_model runs/u090/model_config.json
-
-pkill -f "outdir runs/uncond"
-nohup python train_tailfm.py --data data/returns_clean.csv --train-all --steps 40000 --outdir runs/uncond > runs/uncond.out 2>&1 &
 ```
