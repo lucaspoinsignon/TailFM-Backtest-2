@@ -208,19 +208,20 @@ def run(args):
     # ------------------------------------------------------------ risk report
     # a summary of the generated law, not a validation of it: the CIs cover sampling
     # error in the M generated windows only.  Coverage testing is run_backtest.py.
+    # Empirical estimator on both sides, as for the real losses and in run_backtest.py.
     if not args.no_risk:
         L_real = portfolio_losses(real, weights=w, horizon=h)
         print(f"\n=== Portfolio VaR/CVaR of the h={h} loss (generated law vs the "
-              f"{L_real.size} real {h}-day losses of the reference) ===")
+              f"{L_real.size} real {h}-day losses of the reference, empirical) ===")
         for label, g in gens.items():
             rep = estimate_risk(g, alphas=alphas, weights=w, horizon=h,
-                                n_boot=args.n_boot, seed=args.seed)
+                                n_boot=args.n_boot, seed=args.seed, gpd=False)
             for a in alphas:
                 rp = rep[a]
                 vr, cr = var_cvar_empirical(L_real, a)
-                print(f"  {label:>10s} a={a:5.3f}:  VaR {rp['var_gpd']:.5f} "
+                print(f"  {label:>10s} a={a:5.3f}:  VaR {rp['var_emp']:.5f} "
                       f"[{rp['var_ci'][0]:.5f},{rp['var_ci'][1]:.5f}]  "
-                      f"CVaR {rp['cvar_gpd']:.5f} "
+                      f"CVaR {rp['cvar_emp']:.5f} "
                       f"[{rp['cvar_ci'][0]:.5f},{rp['cvar_ci'][1]:.5f}]"
                       f"  |  real VaR {vr:.5f} CVaR {cr:.5f}")
 
