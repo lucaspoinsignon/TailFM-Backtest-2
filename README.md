@@ -36,5 +36,7 @@ python momentum/backtest_mom.py --data data/returns_clean.csv --run level=runs/h
 python momentum/generate_mom.py --data data/returns_clean.csv --run runs/ho090_mom --cond-level 0.9 --direction rising falling --no-save
 python momentum/generate_mom.py --data data/returns_clean.csv --run runs/ho090 --cond-level 0.9 --direction rising falling --no-save
 
+python evaluate.py --data data/returns_clean.csv --gen runs/u090/generated_windows_u0.90.npy --cond-level 0.9 --no-figures --no-novelty
+
 
 ```
