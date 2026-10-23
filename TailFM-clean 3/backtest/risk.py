@@ -65,11 +65,13 @@ def var_cvar_gpd(losses: np.ndarray, alpha: float,
 
 def estimate_risk(gen_windows: np.ndarray, alphas=(0.95, 0.99, 0.995),
                   weights: np.ndarray | None = None, horizon: int | None = None,
-                  n_boot: int = 200, seed: int = 0) -> dict:
-    """Full risk report from generated windows, with bootstrap percentile CIs."""
+                  n_boot: int = 200, seed: int = 0, gpd: bool = True) -> dict:
+    """Full risk report from generated windows, with bootstrap percentile CIs of the
+    GPD-refined estimator (gpd=True) or of the empirical one (gpd=False)."""
     rng = np.random.default_rng(seed)
     L = portfolio_losses(gen_windows, weights, horizon)
     M = L.size
+    est = var_cvar_gpd if gpd else var_cvar_empirical
     report = {}
     for a in alphas:
         v_e, c_e = var_cvar_empirical(L, a)
@@ -77,7 +79,7 @@ def estimate_risk(gen_windows: np.ndarray, alphas=(0.95, 0.99, 0.995),
         boot = np.empty((n_boot, 2))
         for b in range(n_boot):
             Lb = L[rng.integers(0, M, M)]
-            boot[b] = var_cvar_gpd(Lb, a)
+            boot[b] = est(Lb, a)
         lo, hi = np.percentile(boot, [2.5, 97.5], axis=0)
         report[a] = dict(var_emp=v_e, cvar_emp=c_e, var_gpd=v_g, cvar_gpd=c_g,
                          var_ci=(lo[0], hi[0]), cvar_ci=(lo[1], hi[1]))
