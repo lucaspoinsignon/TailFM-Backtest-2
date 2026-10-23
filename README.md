@@ -27,7 +27,12 @@ python generate.py --data data/returns_clean.csv --run runs/u090 --levels 0.9 --
 python generate.py --data data/returns_clean.csv --run runs/u090 --levels 0.9 --no-save --no-recalibrate
 
 
-python evaluate.py --data data/returns_clean.csv --gen runs/u090/generated_windows_u0.90.npy --cond-level 0.9 --no-figures --no-novelty --no-report --weights $(python -c "print(','.join(['-0.00404858'] * 247))") --log runs/u090/evaluate_h1_short.log
+python evaluate.py --data data/returns_clean.csv --gen runs/uncond/generated_windows.npy --no-figures --no-novelty --no-report
+python evaluate.py --data data/returns_clean.csv --gen runs/uncond/generated_windows.npy --no-figures --no-novelty --no-report --weights=$(python -c "print(','.join(['-0.00404858'] * 247))") --log runs/uncond/evaluate_h1_short.log
 
+
+python generate.py --data data/returns_clean.csv --run runs/u090 --band 0 1
+python evaluate.py --data data/returns_clean.csv --gen runs/u090/generated_windows_u0.00-1.00.npy --no-band --no-figures --no-novelty --no-report
+python evaluate.py --data data/returns_clean.csv --gen runs/u090/generated_windows_u0.00-1.00.npy --no-band --no-figures --no-novelty --no-report --weights=$(python -c "print(','.join(['-0.00404858'] * 247))") --log runs/u090/evaluate_h1_all_short.log
 
 ```
