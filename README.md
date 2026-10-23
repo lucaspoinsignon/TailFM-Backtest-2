@@ -26,6 +26,8 @@ python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated
 python generate.py --data data/returns_clean.csv --run runs/u090 --levels 0.9 --no-save
 python generate.py --data data/returns_clean.csv --run runs/u090 --levels 0.9 --no-save --no-recalibrate
 
+grep "# command" runs/u090/report.log
+
 
 python generate.py --data data/returns_clean.csv --run runs/uncond
 
