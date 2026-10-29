@@ -142,7 +142,9 @@ def read_sidecar(npy: str) -> dict | None:
     p = sidecar_path(npy)
     if os.path.exists(p):
         with open(p) as fh:
-            return json.load(fh)
+            meta = json.load(fh)
+        if isinstance(meta, dict):        # a .json of another kind is not a sidecar
+            return meta
     m = re.search(r"_u(\d*\.\d+)(?:-(\d*\.\d+))?", os.path.basename(npy))
     if not m:
         return None
