@@ -128,6 +128,17 @@ def design_block(n_obs: int, var_levels, es_levels, power_mults) -> None:
               f"[N*alpha] = {m}" + ("  <-- " + "; ".join(notes) if notes else ""))
 
 
+def real_var_es(x, alpha):
+    """VaR and ES of the realised P&L x at tail probability alpha, positive, with the same
+    estimators as PredictivePnL: VaR = -x_(ceil(alpha n)), ES exact for the empirical law."""
+    s = np.sort(np.asarray(x, dtype=float))
+    n = s.size
+    var = -s[min(max(int(np.ceil(alpha * n)) - 1, 0), n - 1)]
+    k = int(np.floor(alpha * n))
+    integral = s[:k].sum() / n + ((alpha - k / n) * s[k] if k < n else 0.0)
+    return float(var), float(-integral / alpha)
+
+
 def backtest_one(label, x, pred, var_levels, es_levels, args) -> dict:
     n = x.size
     print(f"\n{'=' * 74}\n{label}: {pred}\n{'=' * 74}")
@@ -143,7 +154,8 @@ def backtest_one(label, x, pred, var_levels, es_levels, args) -> dict:
         v = first_failure(exceed)
         tu = tuff_test(v, p_star, n=n)
         lo, hi = pf_nonrejection_region(n, p_star)
-        print(f"  level {lv:.3f} (p*={p_star:.4f})  VaR = {var:.5f}")
+        print(f"  level {lv:.3f} (p*={p_star:.4f})  VaR = {var:.5f}   | real VaR = "
+              f"{real_var_es(x, p_star)[0]:.5f}")
         print(f"    PF   : x = {n_exc} of {n} (expected {pf['expected']:.2f}, "
               f"rate {pf['observed_rate']:.4f}) | accept [{lo}, {hi}] | "
               f"LR = {pf['LR']:.3f}  p = {pf['p_value']:.4f} "
@@ -159,8 +171,9 @@ def backtest_one(label, x, pred, var_levels, es_levels, args) -> dict:
     print("\n--- Acerbi-Szekely (2014) Expected Shortfall backtests ---")
     for lv in es_levels:
         a = 1.0 - lv
+        rv, re = real_var_es(x, a)
         print(f"  level {lv:.3f} (alpha={a:.4f})  VaR = {pred.var(a):.5f}  "
-              f"ES = {pred.es(a):.5f}")
+              f"ES = {pred.es(a):.5f}   | real VaR = {rv:.5f}  ES = {re:.5f}")
         r1 = test_z1(x, pred, a, n_sim=args.n_sim, seed=args.seed)
         r2 = test_z2(x, pred, a, n_sim=args.n_sim, seed=args.seed)
         r3 = test_z3(x, pred, a, n_sim=args.n_sim, seed=args.seed)
