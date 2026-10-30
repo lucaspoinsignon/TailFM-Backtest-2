@@ -1,7 +1,6 @@
 """Plan K leave-episodes-out folds for a regime band and write the exact commands.
 
     python make_folds.py --run runs/u090 --band 0.87 0.93 --k 5
-    python make_folds.py --run runs/all090_skew --prefix runs/skewfold --name folds_skew
 
 Band days (u in the band, u from --run's cond_u.npy) are grouped into episodes (a gap of more
 than --gap rows starts a new one), and consecutive episodes into K folds with about equal
@@ -12,7 +11,7 @@ The training flags are copied from the "# command" line of --run's report.log (o
 that generated during training too: --gen / --ode-steps / --no-recalibrate move to
 generate.py, --gen-cond / --gen-mode / --band-width are dropped).  Writes folds.sh
 (train, generate, backtest, one fold after the other) and folds.json (read by
-pooled_ci.py); --prefix / --name change those names so several fold sets can coexist.
+pooled_ci.py).
 """
 import argparse
 import json
@@ -31,8 +30,6 @@ ap.add_argument("--gap", type=int, default=50, help="rows between band days that
 ap.add_argument("--pad", type=int, default=25, help="rows excluded from training on each side")
 ap.add_argument("--levels", default="0.8 0.9", help="--levels generated in each fold run")
 ap.add_argument("--level", type=float, default=0.9, help="level backtested on the band")
-ap.add_argument("--prefix", default="runs/fold", help="fold k is trained into <prefix>k")
-ap.add_argument("--name", default="folds", help="writes <name>.sh and <name>.json")
 a = ap.parse_args()
 assert a.gap >= 2 * a.pad, "--gap must be >= 2 * --pad, or folds would share test days"
 
@@ -86,7 +83,7 @@ print(f"{idx.size} band days in {len(eps)} episodes -> {len(folds)} folds")
 for k, fe in enumerate(folds, 1):
     ranges = [(max(e[0] - a.pad, 0), min(e[-1] + a.pad, T - 1)) for e in fe]
     per = [(d(lo), d(hi)) for lo, hi in ranges]
-    out, n_band = f"{a.prefix}{k}", sum(e.size for e in fe)
+    out, n_band = f"runs/fold{k}", sum(e.size for e in fe)
     print(f"  fold {k}: {n_band:4d} band days in {len(fe)} episodes, {per[0][0]} -> {per[-1][1]}, "
           f"{sum(hi - lo + 1 for lo, hi in ranges) / T:.1%} of rows left out of training")
     sh += [f"# fold {k}: {n_band} band days",
@@ -99,9 +96,9 @@ for k, fe in enumerate(folds, 1):
            + " ".join(f"--test-period {p} {q}" for p, q in per)
            + f" --cond-band {a.band[0]} {a.band[1]} --horizon 1 --log {out}/bt_u{lev}.log", ""]
     meta.append(dict(run=out, test_periods=[list(p) for p in per]))
-with open(f"{a.name}.sh", "w") as fh:
+with open("folds.sh", "w") as fh:
     fh.write("\n".join(sh))
-with open(f"{a.name}.json", "w") as fh:
+with open("folds.json", "w") as fh:
     json.dump(dict(band=a.band, folds=meta), fh, indent=2)
-print(f"\nwrote {a.name}.sh and {a.name}.json; flags copied from the train-all run:\n  train:    "
+print("\nwrote folds.sh and folds.json; flags copied from the train-all run:\n  train:    "
       + flags + "\n  generate: " + (gen_flags or "(defaults)"))
