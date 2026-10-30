@@ -3,6 +3,8 @@
     python pooled_ci.py                                              # each fold's own u0.90 model
     python pooled_ci.py --level 0.80                                 # wrong-regime check
     python pooled_ci.py --same runs/u090/generated_windows_u0.90.npy # same days, in-sample model
+    python pooled_ci.py --suffix _fx                                 # each fold's _fx sample
+    python pooled_ci.py --folds folds_skew.json                      # another fold set
 
 Every band day is scored by the model of its fold, which was not trained on it, with the
 scenarios as generated.  For each scale c the model law of fold k is c * P_k, and
@@ -25,6 +27,7 @@ ap.add_argument("--data", default="data/returns_clean.csv")
 ap.add_argument("--folds", default="folds.json")
 ap.add_argument("--level", type=float, default=0.9)
 ap.add_argument("--same", default=None, help="score every fold with this one sample instead")
+ap.add_argument("--suffix", default="", help="score generated_windows_u<level><suffix>.npy")
 ap.add_argument("--n-sim", type=int, default=5000)
 a = ap.parse_args()
 
@@ -36,7 +39,7 @@ w = np.full(r.shape[1], 1 / r.shape[1])
 
 xs, laws = [], []
 for f in cfg["folds"]:
-    gen = a.same or os.path.join(f["run"], f"generated_windows_u{a.level:.2f}.npy")
+    gen = a.same or os.path.join(f["run"], f"generated_windows_u{a.level:.2f}{a.suffix}.npy")
     u = np.load(os.path.join(os.path.dirname(gen), "cond_u.npy"))     # the model's own u
     m = (u >= lo) & (u <= hi) & period_mask(dates, f["test_periods"])
     y = np.load(gen, mmap_mode="r")[:, 0, :] @ w
