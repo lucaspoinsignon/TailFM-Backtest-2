@@ -1,43 +1,43 @@
 ```bash
-python train_tailfm.py --data data/returns_clean.csv --outdir runs/cond_all --train-all --cond-valor 1234567 --gen-cond 0.8
+python factor_whatif.py --data data/returns_clean.csv --gen runs/all090/generated_windows_u0.90.npy
+mkdir -p runs/all090/sf_fx
+python stylized_facts.py --data data/returns_clean.csv --gen runs/all090/generated_windows_u0.90_fx.npy --outdir runs/all090/sf_fx --no-assets-summary
+python run_backtest.py --data data/returns_clean.csv --gen base=runs/all090/generated_windows_u0.90.npy --gen fx=runs/all090/generated_windows_u0.90_fx.npy --horizon 1 --log runs/all090/bt_fx.log
 
-python run_backtest.py --data data/returns_clean.csv --gen runs/cond_all/generated_windows_u0.80.npy --horizon 1 --cond-band 0.7 0.9
+# 1b conditional, out-of-sample (each fold's target uses its own training days only)
+for k in 1 2 3 4 5; do python factor_whatif.py --data data/returns_clean.csv --gen runs/fold$k/generated_windows_u0.90.npy; done
+python pooled_ci.py | tee pooled_base.txt
+python pooled_ci.py --suffix _fx | tee pooled_fx.txt
 
-python evaluate.py --data data/returns_clean.csv --gen runs/cond_all/generated_windows_u0.80.npy --no-marginals
-
-python cond_check.py --data data/returns_clean.csv --run runs/cond_all
-
-
-
-python train_tailfm.py --data data/returns_clean.csv --outdir runs/cond_multi --train-all --cond-valor 4155001 --gen-cond 0.3 0.6 0.9
-
-python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.30.npy --no-marginals
-python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.60.npy --no-marginals
-python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.90.npy --no-marginals
-
-python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.30.npy --horizon 1 --cond-band 0.25 0.35 --log runs/cond_multi/backtest_u0.30.log
-python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.60.npy --horizon 1 --cond-band 0.55 0.65 --log runs/cond_multi/backtest_u0.60.log
-python run_backtest.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.90.npy --horizon 1 --cond-band 0.85 0.95 --log runs/cond_multi/backtest_u0.90.log
-
-python cond_check.py --data data/returns_clean.csv --run runs/cond_multi --levels 0.3 0.6 0.9 --num 20000 --save
-python evaluate.py --data data/returns_clean.csv --gen runs/cond_multi/generated_windows_u0.90.npy --no-marginals
-
-
-python generate.py --data data/returns_clean.csv --run runs/u090 --levels 0.9 --no-save
-python generate.py --data data/returns_clean.csv --run runs/u090 --levels 0.9 --no-save --no-recalibrate
+# 1c unconditional (all days, in-sample)
+python factor_whatif.py --data data/returns_clean.csv --gen runs/uncond/generated_windows.npy
+mkdir -p runs/uncond/sf_fx
+python stylized_facts.py --data data/returns_clean.csv --gen runs/uncond/generated_windows_fx.npy --outdir runs/uncond/sf_fx --no-assets-summary
+python run_backtest.py --data data/returns_clean.csv --gen base=runs/uncond/generated_windows.npy --gen fx=runs/uncond/generated_windows_fx.npy --horizon 1 --log runs/uncond/bt_fx.log
 
 
 
-nohup python train_tailfm.py --data data/returns_clean.csv --train-all --outdir runs/uncond > runs/uncond.out 2>&1 &
+grep "# command" runs/uncond/report.log runs/all090/report.log
 
-python generate.py --data data/returns_clean.csv --run runs/u090 --band 0 1
-python evaluate.py --data data/returns_clean.csv --gen runs/u090/generated_windows_u0.00-1.00.npy --no-band --no-figures --no-novelty --no-report
-python evaluate.py --data data/returns_clean.csv --gen runs/u090/generated_windows_u0.00-1.00.npy --no-band --no-figures --no-novelty --no-report --weights=$(python -c "print(','.join(['-0.00404858'] * 247))") --log runs/u090/evaluate_h1_all_short.log
 
-python generate.py --data data/returns_clean.csv --run runs/uncond
-python evaluate.py --data data/returns_clean.csv --gen runs/uncond/generated_windows.npy --no-figures --no-novelty --no-report
-python evaluate.py --data data/returns_clean.csv --gen runs/uncond/generated_windows.npy --no-figures --no-novelty --no-report --weights=$(python -c "print(','.join(['-0.00404858'] * 247))") --log runs/uncond/evaluate_h1_short.log
 
+
+# 2a unconditional
+python train_tailfm.py --data data/returns_clean.csv --train-all --steps 40000 --source skew --outdir runs/uncond_skew
+python generate.py --data data/returns_clean.csv --run runs/uncond_skew
+python stylized_facts.py --data data/returns_clean.csv --gen runs/uncond_skew/generated_windows.npy
+python run_backtest.py --data data/returns_clean.csv --gen base=runs/uncond/generated_windows.npy --gen skew=runs/uncond_skew/generated_windows.npy --horizon 1 --log runs/uncond_skew/bt_compare.log
+
+# 2b conditional, in-sample
+python train_tailfm.py --data data/returns_clean.csv --cond-valor 4155001 --train-all --steps 40000 --source skew --outdir runs/all090_skew
+python generate.py --data data/returns_clean.csv --run runs/all090_skew --levels 0.9
+python stylized_facts.py --data data/returns_clean.csv --gen runs/all090_skew/generated_windows_u0.90.npy
+python run_backtest.py --data data/returns_clean.csv --gen base=runs/all090/generated_windows_u0.90.npy --gen skew=runs/all090_skew/generated_windows_u0.90.npy --horizon 1 --log runs/all090_skew/bt_compare.log
+
+# 2c conditional, out-of-sample (same folds as the base, new folders runs/skewfold1..5)
+python make_folds.py --run runs/all090_skew --prefix runs/skewfold --name folds_skew
+bash folds_skew.sh
+python pooled_ci.py --folds folds_skew.json | tee pooled_skew.txt
 
 
 ```
