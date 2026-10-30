@@ -1,32 +1,87 @@
-"""Stylized facts of generated vs real returns, on the model's whole 24-day windows.
+"""Stylized facts of generated vs real returns on the model's 24-day windows, with
+uncertainty intervals for both sides and for their difference.
 
     python stylized_facts.py --data data/returns_clean.csv --gen runs/uncond/generated_windows.npy
     python stylized_facts.py --data data/returns_clean.csv --gen runs/u090/generated_windows_u0.90.npy
     python stylized_facts.py ... --assets 4155001          # also single columns, e.g. MSCI World
 
-Reference = the real windows chosen as in evaluate.py: by default the training windows,
-for a conditional sample only those whose first day has u in the sample's band (its
-.json sidecar); --no-band / --cond-level / --cond-band / --holdout / --test-period /
---exclude-period override.  Static facts use day 1 of each window (each real day once),
-dynamic facts use the whole windows.
+Reference = the real windows chosen as in evaluate.py (default: training windows; for a
+conditional sample those whose first day has u in the sample's band; --no-band /
+--cond-level / --cond-band / --holdout / --test-period / --exclude-period override).
+Day-1 facts use the first day of each window (each real day once); dynamic facts use
+whole windows.  Series: the equal-weight portfolio (--weights), each --assets column, and
+a summary over all assets.
 
-Series: the equal-weight portfolio (--weights to change it), each --assets column, and a
-summary over all assets (median and quartiles across the f columns).
+Why these statistics.  The Hill indices of these returns are about 2-3, so E|r|^p is
+infinite for p >= alpha: skewness (p = 3) and kurtosis (p = 4) do not exist, and their
+sample versions do not converge; they grow with the sample size, so 20,000 generated
+days cannot be compared with 5,000 real ones.  Every statistic below is a functional that
+exists for any law, estimated consistently at the usual rate:
 
-    1 heavy tails                 excess kurtosis, Hill tail index of each tail (top 5%)
-    2 gain / loss asymmetry       skewness, A95 = (VaR95 of losses + mu) / (VaR95 of gains - mu)
-    3 aggregational Gaussianity   excess kurtosis of h-day sums, variance ratio, h = 1, 5, 10, 24
-    4 no linear autocorrelation   ACF of r, lags 1..10
-    5 volatility clustering       ACF of |r|, lags 1..10
-    6 leverage effect             corr(r_t, |r_t+k|), k = 1..10 (negative for equities)
-    7 asymmetric correlation      mean pairwise correlation of the assets on all / the 10%
-                                  worst / the 10% best equal-weight days (portfolio only)
+    scale             IQR = q75 - q25
+    tail weight       T99 = (q99 - q01) / IQR                     (Gaussian: 3.45)
+    asymmetry         Hinkley S_p = (q_{1-p} + q_p - 2 q50) / (q_{1-p} - q_p), p = 5%, 1%
+                      (0 if symmetric, < 0 if the loss tail is longer)
+    tail index        Hill alpha on the top 5% of each tail.  k is 5% of the sample on
+                      both sides, so both estimate the same functional
+                      1 / E[log(Y / y95) | Y > y95] whatever the sample size.
+    aggregation       T99 of h-day sums, and IQR(S_h) / (sqrt(h) IQR(S_1)) (1 for iid
+                      Gaussian days), h = 5, 10, 24
+    dependence in time  Spearman (rank) correlations pooled over windows and positions:
+                      of r_t, r_t+k (no linear dependence), of |r_t|, |r_t+k| (volatility
+                      clustering), of r_t, |r_t+k| (leverage, < 0 for equities).  For
+                      alpha < 4 the sample ACF of r or |r| converges at the rate
+                      n^(1 - 2/alpha) (n^0.13 for alpha = 2.3) to a non-Gaussian limit
+                      (Davis & Mikosch 1998, Ann. Statist.); rank correlations converge at
+                      sqrt(n) for any tail.
+                      The pooled ACF of |r| mixes clustering inside a window with the spread
+                      of volatility levels between windows (a model drawing one sigma per
+                      window and iid days inside reproduces much of it).  Two rows separate
+                      them: the within-window ACF of |r| (ranks of |r| inside each window;
+                      -1/(n-1) = -0.04 for exchangeable days whatever their level), and the
+                      dispersion (q75 - q25) / q50 of the windows' mean |r|.
+    cross-section (portfolio section, day 1)
+                      mean pairwise Spearman correlation, and mean pairwise tail
+                      dependence lambda_L(5%) = P(U_i <= q, U_j <= q) / q, lambda_U(5%)
+                      the same for the upper tail, on pseudo-observations (ranks).
+                      lambda_L > lambda_U: assets fall together more than they rise.
 
-ACFs are pooled over windows with the global mean and variance, so real and generated are
-estimated the same way.  With a few hundred real windows (one regime band) the real
-statistics are noisy, kurtosis and the tail index above all.
+Uncertainty (B replicates, 90% percentile intervals).  The statistic is recomputed on
+each resample, ranks included.
+    real        moving-block bootstrap in calendar time: blocks [c, c + --block) of trading
+                days with c uniform, so every window is drawn with the same probability,
+                volatility clustering up to the block length is kept, and windows of
+                different regime episodes are resampled independently.
+    generated   iid bootstrap over windows (generated windows are independent).
+    difference  percentile interval of gen* - real*; '*' when it excludes 0.
+With m rows, a model equal to the data would still show about 0.1 m flags (rows are
+correlated, so they come in groups).  On the training windows the model was fit to the
+very data it is compared with, which makes agreement easier; --holdout compares with days
+it was not trained on.
 
-Writes stylized_facts[_<selection>].log and .png next to the first --gen.
+How far to trust a flag.  Checked by simulation: "real" = one 5,387-day path, "generated"
+= independent windows, both from the same factor GJR-GARCH-t (persistence 0.99, Hill
+alpha about 2.3).  At nominal 10% the share of rows flagged was
+    u-band comparison (conditional sample)           14%: about calibrated
+    all days (unconditional sample)                   22% overall:
+        rows marked + (depend on the mix of volatility levels: scale, tail weight, Hill,
+        pooled |r| ACF, vol dispersion, rank corr, lambda_L, lambda_U)       35-45%
+        other rows (skew, aggregation scale, within-window ACF, leverage,
+        rank ACF of r, lambda_L - lambda_U)                                    0-20%
+A 20-year path holds about one extreme volatility episode, which the stationary law
+includes on average: a calm path shows lighter tails, weaker clustering and lower tail
+dependence than the law it comes from, and a bootstrap of that path cannot produce the
+episodes it lacks (longer blocks do not help: 60, 250 and 500 days gave the same rates).
+So on the unconditional comparison a '+' row flagged is weak evidence; compare those
+statistics within u-bands, where the volatility level is held fixed.  On iid data the
+rate is 11% with --block 250 but 13% with 24: blocks must be much longer than a window,
+since overlapping windows share days.
+No flag is not agreement either: 20 years give limited power.  In the same simulation,
+generated windows without the leverage effect (GJR gamma 0.12 -> 0) were flagged on 62% of
+the leverage rows (all days) and 30% (u-band); a lighter factor tail (t5 -> t12) on 23% of
+the tail rows (u-band).
+
+Writes stylized_facts[_<selection>].log and .png next to the --gen file.
 """
 from __future__ import annotations
 
@@ -46,149 +101,278 @@ from run_logging import tee_output
 from splits import add_split_args, add_split_source_args, require_split
 from tailfm.evt import hill_estimator
 
-LAGS = np.arange(1, 11)
-HS = (1, 5, 10, 24)
+LAGS = np.arange(1, 11)                 # figure
+TABLE_LAGS = (1, 2, 5, 10)              # tables
+HS = (5, 10, 24)
+T99_GAUSS = (stats.norm.ppf(0.99) - stats.norm.ppf(0.01)) / (stats.norm.ppf(0.75) - stats.norm.ppf(0.25))
+PGRID = np.linspace(0.002, 0.998, 300)
+
+
+# ------------------------------------------------------------------ resampling
+def block_indices(s, L, rng):
+    """Moving-block bootstrap in calendar time over windows with sorted starts s: a block is
+    the windows starting in [c, c + L) with c uniform on (s_0 - L, s_last], so every window
+    lies in a block with the same probability L / (span + L) and gaps (other regime
+    episodes) are never bridged; span / L + 1 blocks, so the resample has s.size windows on
+    average (its size is random, like the number of selected days in a history)."""
+    lo, hi = s[0] - L + 1, s[-1]
+    while True:
+        c = rng.integers(lo, hi + 1, -(-(hi - lo + 1) // L))
+        a, b = np.searchsorted(s, c), np.searchsorted(s, c + L)
+        idx = np.concatenate([np.arange(i, j) for i, j in zip(a, b)])
+        if idx.size >= 10:
+            return idx
+
+
+class Ranker:
+    """Pseudo-observations (average rank / (count + 1)) of the row-resample A[idx] of A (N, c),
+    ranked over all entries (pooled) or within each column.  An entry's rank in the resample
+    depends only on its tie group in A and on how often each row was drawn, so the ranks are
+    exact (ties averaged) and cost O(N c) per replicate instead of a sort."""
+
+    def __init__(self, A, pooled):
+        N, c = A.shape
+        if pooled:
+            g = np.unique(A.ravel(), return_inverse=True)[1].reshape(N, c)
+            self.col = np.zeros(g.max() + 1, dtype=int)
+        else:
+            d = stats.rankdata(A, method="dense", axis=0).astype(np.int64) - 1
+            sizes = d.max(axis=0) + 1
+            g = d + np.concatenate([[0], np.cumsum(sizes)[:-1]])
+            self.col = np.repeat(np.arange(c), sizes)
+        self.g, self.pooled = g, pooled
+
+    def __call__(self, idx):
+        N, c = self.g.shape
+        m = np.bincount(idx, minlength=N).astype(float)
+        w = np.bincount(self.g.ravel(), np.repeat(m, c), self.col.size)
+        n = idx.size * (c if self.pooled else 1)            # entries per ranking
+        rank = np.cumsum(w) - w - self.col * n + (w + 1) / 2
+        return rank[self.g[idx]] / (n + 1)
+
+
+def bootstrap(fn, N, idx_sets):
+    """fn on the sample (rows 0..N-1) and on each resample."""
+    point = fn(np.arange(N))
+    reps = [fn(i) for i in idx_sets]
+    return point, {k: np.array([r[k] for r in reps]) for k in point}
 
 
 # ------------------------------------------------------------------ statistics
-def acf(y, z, k):
-    """corr(y_t, z_t+k) pooled over windows (rows), global means and sds."""
-    a, b = y[:, :-k] - y.mean(), z[:, k:] - z.mean()
-    return float((a * b).mean() / (y.std() * z.std()))
+def quantile_stats(x):
+    q01, q05, q25, q50, q75, q95, q99 = np.quantile(x, [.01, .05, .25, .5, .75, .95, .99])
+    iqr = q75 - q25
+    return dict(iqr=iqr, t99=(q99 - q01) / iqr if iqr > 0 else np.nan,
+                hink05=(q95 + q05 - 2 * q50) / (q95 - q05) if q95 > q05 else np.nan,
+                hink01=(q99 + q01 - 2 * q50) / (q99 - q01) if q99 > q01 else np.nan)
 
 
-def mean_corr(x):
-    """Mean off-diagonal correlation of the columns of x (m, f); constant columns dropped."""
-    sd = x.std(axis=0)
-    z = (x[:, sd > 0] - x[:, sd > 0].mean(axis=0)) / sd[sd > 0]
-    m, f = z.shape
-    return float(((z.sum(axis=1) ** 2).sum() / m - f) / (f * (f - 1)))
+def lagcorr(Y, Z, k):
+    """corr(Y[:, t], Z[:, t+k]) pooled over windows and positions t."""
+    a, b = Y[:, :-k], Z[:, k:]
+    a, b = a - a.mean(), b - b.mean()
+    return float((a * b).mean() / np.sqrt((a * a).mean() * (b * b).mean()))
 
 
-def facts(P):
-    """Stylized facts of one series given as windows P (M, n)."""
-    x, n = P[:, 0], P.shape[1]
-    mu = x.mean()
-    out = dict(
-        kurt=stats.kurtosis(x), skew=stats.skew(x),
-        hill_lo=hill_estimator(x, 0.05, "lower"), hill_hi=hill_estimator(x, 0.05, "upper"),
-        A95=(-np.quantile(x, 0.05) + mu) / (np.quantile(x, 0.95) - mu),
-        acf_r=[acf(P, P, k) for k in LAGS if k < n],
-        acf_abs=[acf(np.abs(P), np.abs(P), k) for k in LAGS if k < n],
-        lev=[acf(P, np.abs(P), k) for k in LAGS if k < n],
-    )
-    hs = [h for h in HS if h <= n]
-    sums = {h: P[:, :h].sum(axis=1) for h in hs}
-    out["kurt_h"] = {h: stats.kurtosis(s) for h, s in sums.items()}
-    out["vr_h"] = {h: s.var() / (h * x.var()) for h, s in sums.items()}
-    return out
+class Windows:
+    """Statistics of one series' windows X (N, n) and of its row-resamples."""
+
+    def __init__(self, X):
+        self.X, self.rr, self.ra = X, Ranker(X, True), Ranker(np.abs(X), True)
+        self.rw = stats.rankdata(np.abs(X), axis=1) / (X.shape[1] + 1)   # ranks within window
+        self.vol = np.abs(X).mean(axis=1)                                 # window volatility
+
+    def stats(self, idx, lags=LAGS, hs=HS):
+        X = self.X[idx]
+        x = X[:, 0]
+        s = quantile_stats(x)
+        s["hill_lo"], s["hill_hi"] = hill_estimator(x, 0.05, "lower"), hill_estimator(x, 0.05, "upper")
+        Rr, Ra, Rw = self.rr(idx), self.ra(idx), self.rw[idx]
+        for k in (k for k in lags if k < X.shape[1]):
+            s[f"acf_r{k}"], s[f"acf_a{k}"], s[f"acfw{k}"], s[f"lev{k}"] = (
+                lagcorr(Rr, Rr, k), lagcorr(Ra, Ra, k), lagcorr(Rw, Rw, k), lagcorr(Rr, Ra, k))
+        q25, q50, q75 = np.quantile(self.vol[idx], [0.25, 0.5, 0.75])
+        s["vol_disp"] = (q75 - q25) / q50 if q50 > 0 else np.nan
+        for h in (h for h in hs if h <= X.shape[1]):
+            qh = quantile_stats(X[:, :h].sum(axis=1))
+            s[f"t99_{h}"], s[f"scale_{h}"] = qh["t99"], qh["iqr"] / (np.sqrt(h) * s["iqr"])
+        return s
+
+
+class CrossSection:
+    """Mean pairwise Spearman correlation and tail dependence of day-1 vectors X1 (N, f)."""
+
+    def __init__(self, X1, q=0.05):
+        self.rank, self.q = Ranker(X1, False), q
+
+    def stats(self, idx):
+        U, q = self.rank(idx), self.q
+        p = U.shape[1] * (U.shape[1] - 1)                   # ordered pairs i != j
+        Z = (U - U.mean(axis=0)) / U.std(axis=0)
+        a, bl, bu = Z.sum(axis=1), (U <= q).sum(axis=1), (U > 1 - q).sum(axis=1)
+        lam_l, lam_u = (bl * (bl - 1)).mean() / (p * q), (bu * (bu - 1)).mean() / (p * q)
+        return dict(rho=(a * a - (Z * Z).sum(axis=1)).mean() / p, lam_l=lam_l, lam_u=lam_u,
+                    lam_asym=lam_l - lam_u)
 
 
 # ------------------------------------------------------------------ report
-def row(name, r, g, fmt="{:8.3f}"):
-    print(f"  {name:<34s} {fmt.format(r)}  {fmt.format(g)}")
+LABELS = {
+    "iqr": "IQR, day 1", "t99": f"tail weight T99, day 1 (Gauss {T99_GAUSS:.2f})",
+    "hink05": "Hinkley skew 5% (<0: loss tail)", "hink01": "Hinkley skew 1%",
+    "hill_lo": "Hill alpha, loss tail", "hill_hi": "Hill alpha, gain tail",
+    "rho": "mean pairwise rank corr", "lam_l": "tail dependence lambda_L(5%)",
+    "lam_u": "tail dependence lambda_U(5%)", "lam_asym": "lambda_L - lambda_U",
+}
+for h in HS:
+    LABELS[f"t99_{h}"] = f"T99 of {h}-day sums"
+    LABELS[f"scale_{h}"] = f"IQR({h}-day sum) / (sqrt({h}) IQR)"
+for k in LAGS:
+    LABELS[f"acf_r{k}"] = f"rank ACF of r, lag {k}"
+    LABELS[f"acf_a{k}"] = f"rank ACF of |r|, lag {k}"
+    LABELS[f"acfw{k}"] = f"within-window ACF of |r|, lag {k}"
+    LABELS[f"lev{k}"] = f"rank corr(r_t, |r_t+{k}|)"
+LABELS["vol_disp"] = "dispersion of window mean |r|"
+SECTIONS = [
+    ("marginal, day 1", ["iqr", "t99", "hink05", "hink01", "hill_lo", "hill_hi"]),
+    ("aggregation", [f"{s}_{h}" for h in HS for s in ("t99", "scale")]),
+    ("dependence in time", [f"{s}{k}" for s in ("acf_r", "acf_a", "acfw", "lev") for k in TABLE_LAGS]
+     + ["vol_disp"]),
+    ("cross-section, day 1", ["rho", "lam_l", "lam_u", "lam_asym"]),
+]
+# rows driven by the mix of volatility levels in the sample (see "How far to trust a flag")
+LEVEL = ({"iqr", "t99", "hill_lo", "hill_hi", "vol_disp", "rho", "lam_l", "lam_u"}
+         | {f"t99_{h}" for h in HS} | {f"acf_a{k}" for k in LAGS})
 
 
-def lag_rows(name, r, g):
-    print(f"  {name}")
-    print("    lag     " + " ".join(f"{k:>6d}" for k in LAGS[:len(r)]))
-    print("    real    " + " ".join(f"{v:6.3f}" for v in r))
-    print("    gen     " + " ".join(f"{v:6.3f}" for v in g))
+def row_label(k, mixed):
+    return LABELS[k] + (" +" if mixed and k in LEVEL else "")
 
 
-def report(title, fr, fg, extra=None):
-    print(f"\n=== {title} ===\n  {'':<34s} {'real':>8s}  {'gen':>8s}")
-    row("excess kurtosis (day 1)", fr["kurt"], fg["kurt"])
-    row("skewness (day 1)", fr["skew"], fg["skew"])
-    row("Hill tail index, loss tail", fr["hill_lo"], fg["hill_lo"])
-    row("Hill tail index, gain tail", fr["hill_hi"], fg["hill_hi"])
-    row("A95 loss / gain (1 = symmetric)", fr["A95"], fg["A95"])
-    for h in fr["kurt_h"]:
-        row(f"excess kurtosis of {h}-day sums", fr["kurt_h"][h], fg["kurt_h"][h])
-    for h in fr["vr_h"]:
-        if h > 1:
-            row(f"variance ratio, h = {h}", fr["vr_h"][h], fg["vr_h"][h])
-    lag_rows("ACF of r (should be ~0)", fr["acf_r"], fg["acf_r"])
-    lag_rows("ACF of |r| (volatility clustering, > 0)", fr["acf_abs"], fg["acf_abs"])
-    lag_rows("corr(r_t, |r_t+k|) (leverage, < 0)", fr["lev"], fg["lev"])
-    for name, (r, g) in (extra or {}).items():
-        row(name, r, g)
+def ci(a):
+    return np.nanquantile(a, 0.05), np.nanquantile(a, 0.95)
 
 
-def marginal_summary(R, G, names):
-    """Median [q25, q75] across assets of the day-1 and lag-1 facts, real vs gen."""
-    keys = ("kurt", "skew", "hill_lo", "hill_hi", "A95")
-    vals = {k: ([], []) for k in keys + ("acf_abs1", "lev1")}
+def diff_flag(rr, rg):
+    lo, hi = ci(rg - rr)
+    return lo, hi, bool(lo > 0 or hi < 0)
+
+
+def report(title, R, G, idx_r, idx_g, mixed, cs=None):
+    """Table for one series: windows R (real) and G (generated), each (N, n); `mixed` = the
+    real windows are not restricted to a u-band; `cs` = the two CrossSection objects
+    (real, generated) for the portfolio section."""
+    pr, rr = bootstrap(Windows(R).stats, len(R), idx_r)
+    pg, rg = bootstrap(Windows(G).stats, len(G), idx_g)
+    if cs is not None:
+        for p, r, c, N, idx in ((pr, rr, cs[0], len(R), idx_r), (pg, rg, cs[1], len(G), idx_g)):
+            cp, cr = bootstrap(c.stats, N, idx)
+            p.update(cp)
+            r.update(cr)
+    print(f"\n=== {title}: {len(R)} real windows, {len(G)} generated, B = {len(idx_r)} ===")
+    print(f"  {'':<36s} {'real [90%]':>26s} {'gen [90%]':>26s} {'gen - real [90%]':>27s}")
+    fmt = lambda v, lo, hi: f"{v:8.4f} [{lo:7.4f},{hi:7.4f}]"
+    flagged = {}
+    for head, keys in SECTIONS:
+        keys = [k for k in keys if k in pr]
+        if keys:
+            print(f"  {head}")
+        for k in keys:
+            lo, hi, flagged[k] = diff_flag(rr[k], rg[k])
+            print(f"    {row_label(k, mixed):<36s} {fmt(pr[k], *ci(rr[k]))} {fmt(pg[k], *ci(rg[k]))} "
+                  f"{fmt(pg[k] - pr[k], lo, hi)} {'*' if flagged[k] else ''}")
+    print(f"  {sum(flagged.values())} of {len(flagged)} rows flagged '*' (90% interval of "
+          f"gen - real excludes 0); about {0.1 * len(flagged):.0f} expected by chance if the "
+          f"model were exact")
+    if mixed:
+        rest = [flagged[k] for k in flagged if k not in LEVEL]
+        print(f"  {sum(rest)} of {len(rest)} rows without '+'.  '+' rows depend on the mix of "
+              f"volatility levels: on an all-days comparison they are flagged too often "
+              f"(simulation: 35-45% at nominal 10%); compare them within u-bands")
+    return pr, rr, pg, rg
+
+
+def asset_summary(R, G, names, idx_r, idx_g, mixed):
+    """Per asset: day-1 and lag-1 statistics; medians across assets and the share of assets
+    whose 90% interval of gen - real excludes 0 (about 10% by chance)."""
+    keys = ["iqr", "t99", "hink05", "hill_lo", "hill_hi", "acf_r1", "acf_a1", "acfw1", "lev1",
+            "vol_disp"]
+    res = {k: [] for k in keys}                         # (real, gen, flagged) per asset
     for a in range(0, R.shape[2], 32):
-        Gb = np.asarray(G[:, :, a:a + 32], dtype=float)          # one read per block
+        Gb = np.asarray(G[:, :, a:a + 32], dtype=float)
         for j in range(a, min(a + 32, R.shape[2])):
-            _one_asset(R[:, :, j], Gb[:, :, j - a], vals)
-    _print_summary(vals, len(names))
+            if R[:, 0, j].std() == 0 or Gb[:, 0, j - a].std() == 0:
+                continue
+            fr = lambda idx, W=Windows(R[:, :, j]): W.stats(idx, lags=(1,), hs=())
+            fg = lambda idx, W=Windows(Gb[:, :, j - a]): W.stats(idx, lags=(1,), hs=())
+            pr, rr = bootstrap(fr, len(R), idx_r)
+            pg, rg = bootstrap(fg, len(Gb), idx_g)
+            for k in keys:
+                res[k].append((pr[k], pg[k], diff_flag(rr[k], rg[k])[2]))
+    n = len(res[keys[0]])
+    print(f"\n=== all assets ({n} of {len(names)} non-constant), B = {len(idx_r)} per asset ===")
+    print(f"  {'':<36s} {'median real':>12s} {'median gen':>12s} {'median gen-real':>16s} "
+          f"{'assets flagged':>15s}")
+    for k in keys:
+        r, g, fl = np.array(res[k]).T
+        print(f"  {row_label(k, mixed):<36s} {np.nanmedian(r):12.4f} {np.nanmedian(g):12.4f} "
+              f"{np.nanmedian(g - r):16.4f} {fl.mean():14.0%}")
+    print("  assets flagged = share whose 90% interval of gen - real excludes 0 (about 10% by chance"
+          + ("; more for '+' rows, see above)" if mixed else ")"))
 
 
-def _one_asset(Xr, Xg, vals):
-    for side, X in enumerate((Xr, Xg)):
-        x, mu = X[:, 0], X[:, 0].mean()
-        v = dict(kurt=stats.kurtosis(x), skew=stats.skew(x),
-                 hill_lo=hill_estimator(x, 0.05, "lower"),
-                 hill_hi=hill_estimator(x, 0.05, "upper"),
-                 A95=(-np.quantile(x, 0.05) + mu) / max(np.quantile(x, 0.95) - mu, 1e-12),
-                 acf_abs1=acf(np.abs(X), np.abs(X), 1) if X.std() > 0 else np.nan,
-                 lev1=acf(X, np.abs(X), 1) if X.std() > 0 else np.nan)
-        for k in vals:
-            vals[k][side].append(v[k])
+# ------------------------------------------------------------------ figure
+def errorbars(ax, xs, keys, p, r, color, label, dx, marker="o"):
+    """Point estimates and their 90% intervals (which need not contain them)."""
+    x = np.asarray(xs) + dx
+    lo, hi = np.array([ci(r[k]) for k in keys]).T
+    ax.plot(x, [p[k] for k in keys], marker + "-", color=color, ms=4, label=label)
+    ax.vlines(x, lo, hi, color=color, lw=1)
 
 
-def _print_summary(vals, f):
-    print(f"\n=== all {f} assets: median [q25, q75] across assets ===")
-    print(f"  {'':<26s} {'real':>24s}   {'gen':>24s}   median gen / real")
-    labels = dict(kurt="excess kurtosis (day 1)", skew="skewness (day 1)",
-                  hill_lo="Hill index, loss tail", hill_hi="Hill index, gain tail",
-                  A95="A95 loss / gain", acf_abs1="ACF |r|, lag 1", lev1="leverage, lag 1")
-    for k, (r, g) in vals.items():
-        r, g = np.array(r), np.array(g)
-        ok = np.isfinite(r) & np.isfinite(g)
-        q = lambda a: f"{np.median(a):7.3f} [{np.quantile(a, .25):6.2f},{np.quantile(a, .75):6.2f}]"
-        ratio = np.nanmedian(g[ok] / np.where(r[ok] == 0, np.nan, r[ok])) if k != "skew" else np.nan
-        print(f"  {labels[k]:<26s} {q(r[ok]):>24s}   {q(g[ok]):>24s}   "
-              + (f"{ratio:6.2f}" if np.isfinite(ratio) else "   --"))
-
-
-def figure(Pr, Pg, fr, fg, label, path):
+def figure(R, G, pr, rr, pg, rg, idx_r, label, path):
     fig, ax = plt.subplots(2, 3, figsize=(15, 8.5))
-    p = np.linspace(0.001, 0.999, 400)
-    for a, (xr, xg, t) in zip(ax[0, :2], ((Pr[:, 0], Pg[:, 0], "day 1"),
-                                         (Pr.sum(1), Pg.sum(1), f"{Pr.shape[1]}-day sum"))):
-        qr, qg = np.quantile(xr, p), np.quantile(xg, p)
-        a.plot(qr, qg, ".", ms=3, color="C0")
+    for a, (xr, xg, t) in zip(ax[0, :2], ((R[:, 0], G[:, 0], "day 1"),
+                                         (R.sum(1), G.sum(1), f"{R.shape[1]}-day sum"))):
+        qr, qg = np.quantile(xr, PGRID), np.quantile(xg, PGRID)
+        lo, hi = np.quantile([np.quantile(xr[i], PGRID) for i in idx_r], [0.05, 0.95], axis=0)
+        a.fill_between(qr, lo, hi, color="0.85", label="pointwise 90% band of real quantile")
+        a.plot(qr, qg, ".", ms=3, color="C0", label="generated")
         lim = [min(qr.min(), qg.min()), max(qr.max(), qg.max())]
         a.plot(lim, lim, color="0.4", lw=1)
         a.set(title=f"QQ, {t}: generated vs real", xlabel="real quantile", ylabel="generated quantile")
+        a.legend(loc="upper left")
     a = ax[0, 2]
-    for x, c, lab in ((-Pr[:, 0], "k", "real"), (-Pg[:, 0], "C0", "generated")):
+    for x, c, lab in ((-R[:, 0], "k", "real"), (-G[:, 0], "C0", "generated")):
         s = np.sort(x[x > 0])[::-1]
         a.loglog(s, np.arange(1, s.size + 1) / x.size, color=c, lw=1.2, label=lab)
     a.set(title="loss tail, day 1: P(L > x)", xlabel="loss x")
     a.legend()
-    for a, key, t in ((ax[1, 0], "acf_abs", "ACF of |r| (volatility clustering)"),
-                      (ax[1, 1], "lev", "corr(r_t, |r_t+k|) (leverage)")):
-        L = LAGS[:len(fr[key])]
-        a.plot(L, fr[key], "o-", color="k", label="real")
-        a.plot(L, fg[key], "o-", color="C0", label="generated")
-        if key == "acf_abs":
-            a.plot(L, fr["acf_r"], ":", color="k", lw=1, label="real ACF of r")
-            a.plot(L, fg["acf_r"], ":", color="C0", lw=1, label="gen ACF of r")
-        a.axhline(0, color="0.6", lw=0.8)
-        a.set(title=t, xlabel="lag k (days)")
-        a.legend()
-    a = ax[1, 2]
-    hs = list(fr["kurt_h"])
-    a.plot(hs, [fr["kurt_h"][h] for h in hs], "o-", color="k", label="real")
-    a.plot(hs, [fg["kurt_h"][h] for h in hs], "o-", color="C0", label="generated")
+    L = [k for k in LAGS if f"acf_a{k}" in pr]
+    a = ax[1, 0]
+    for key, mk, t in (("acf_a", "o", "pooled"), ("acfw", "s", "within window")):
+        errorbars(a, L, [f"{key}{k}" for k in L], pr, rr, "k", f"real, {t}", -0.08, mk)
+        errorbars(a, L, [f"{key}{k}" for k in L], pg, rg, "C0", f"generated, {t}", 0.08, mk)
+    a.axhline(-1 / (R.shape[1] - 1), color="0.6", lw=0.8, ls="--", label="within window, iid days")
     a.axhline(0, color="0.6", lw=0.8)
-    a.set(title="excess kurtosis of h-day sums", xlabel="h (days)")
+    a.set(title="rank ACF of |r| (volatility clustering)", xlabel="lag k (days)")
+    a.legend(fontsize=8)
+    a = ax[1, 1]
+    errorbars(a, L, [f"lev{k}" for k in L], pr, rr, "k", "real", -0.08)
+    errorbars(a, L, [f"lev{k}" for k in L], pg, rg, "C0", "generated", 0.08)
+    for p, c in ((pr, "k"), (pg, "C0")):
+        a.plot(L, [p[f"acf_r{k}"] for k in L], ":", color=c, lw=1)
+    a.axhline(0, color="0.6", lw=0.8)
+    a.set(title="rank corr(r_t, |r_t+k|) (leverage; dotted: rank ACF of r)", xlabel="lag k (days)")
     a.legend()
-    fig.suptitle(f"Stylized facts: {label}")
+    a = ax[1, 2]
+    hs = [1] + [h for h in HS if f"t99_{h}" in pr]
+    keys = ["t99"] + [f"t99_{h}" for h in hs[1:]]
+    errorbars(a, hs, keys, pr, rr, "k", "real", -0.3)
+    errorbars(a, hs, keys, pg, rg, "C0", "generated", 0.3)
+    a.axhline(T99_GAUSS, color="0.6", lw=0.8, ls="--", label="Gaussian")
+    a.set(title="tail weight T99 of h-day sums", xlabel="h (days)")
+    a.legend()
+    fig.suptitle(f"Stylized facts: {label} (bars and band: 90% bootstrap intervals)")
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -197,6 +381,7 @@ def figure(Pr, Pg, fr, fg, label, path):
 
 # ------------------------------------------------------------------ main
 def run(args):
+    rng = np.random.default_rng(args.seed)
     gen_path = args.gen.rpartition("=")[2]
     G = np.load(gen_path, mmap_mode="r")
     r = load_returns(args.data, args.prices)
@@ -209,35 +394,41 @@ def run(args):
     u = np.load(os.path.join(os.path.dirname(os.path.abspath(gen_path)), "cond_u.npy")) if band else None
     dates = load_dates(args.data, T) if periods or excluded else None
     starts = real_window_starts(split, n, 1, dates, periods, excluded, band, u, holdout)
-    if starts.size == 0:
-        raise SystemExit("no real window matches the selection")
+    if starts.size < 50:
+        raise SystemExit(f"only {starts.size} real windows match the selection")
     R = np.stack([r[s:s + n] for s in starts])
     print(f"generated {G.shape} vs {R.shape[0]} real {n}-day windows, "
           f"{describe_selection(periods, excluded, band, holdout)}")
+    periods_hit = np.unique(starts // args.block).size
+    print(f"real: block bootstrap, blocks of {args.block} rows; the real windows fall in "
+          f"{periods_hit} disjoint {args.block}-row periods"
+          + ("  WARNING: under 10, so the real intervals rest on too few independent periods"
+             if periods_hit < 10 else ""))
 
+    idx_r = [block_indices(starts, args.block, rng) for _ in range(args.n_boot)]
+    idx_g = [rng.integers(0, len(G), len(G)) for _ in range(args.n_boot)]
     w = (np.array([float(v) for v in args.weights.split(",")]) if args.weights
          else np.full(f, 1.0 / f))
     Pr, Pg = R @ w, np.asarray(G @ w, dtype=float)
-    fr, fg = facts(Pr), facts(Pg)
-    lo_r, hi_r = Pr[:, 0] <= np.quantile(Pr[:, 0], 0.1), Pr[:, 0] >= np.quantile(Pr[:, 0], 0.9)
-    lo_g, hi_g = Pg[:, 0] <= np.quantile(Pg[:, 0], 0.1), Pg[:, 0] >= np.quantile(Pg[:, 0], 0.9)
     G1 = np.asarray(G[:, 0, :], dtype=float)
-    extra = {"mean pairwise corr, all days": (mean_corr(R[:, 0]), mean_corr(G1)),
-             "mean pairwise corr, worst 10%": (mean_corr(R[lo_r, 0]), mean_corr(G1[lo_g])),
-             "mean pairwise corr, best 10%": (mean_corr(R[hi_r, 0]), mean_corr(G1[hi_g]))}
-    report("equal-weight portfolio" if not args.weights else "portfolio (--weights)", fr, fg, extra)
+    keep = (R[:, 0].std(axis=0) > 0) & (G1.std(axis=0) > 0)
+    cs = (CrossSection(R[:, 0, keep]), CrossSection(G1[:, keep]))
+    title = "equal-weight portfolio" if not args.weights else "portfolio (--weights)"
+    mixed = band is None
+    res = report(title, Pr, Pg, idx_r, idx_g, mixed, cs)
     tag = selection_tag(band, periods, excluded, holdout)
     stem = os.path.join(args.outdir or os.path.dirname(os.path.abspath(gen_path)),
                         "stylized_facts" + (f"_{tag}" if tag else ""))
-    paths = [figure(Pr, Pg, fr, fg, "equal-weight portfolio", stem + ".png")]
+    paths = [figure(Pr, Pg, *res, idx_r, title, stem + ".png")]
 
     for a in args.assets or []:
         j = names.index(a)
-        fa_r, fa_g = facts(R[:, :, j]), facts(np.asarray(G[:, :, j], dtype=float))
-        report(f"asset {a}", fa_r, fa_g)
-        paths.append(figure(R[:, :, j], np.asarray(G[:, :, j], dtype=float), fa_r, fa_g,
-                            f"asset {a}", f"{stem}_{a}.png"))
-    marginal_summary(R, G, names)
+        Gj = np.asarray(G[:, :, j], dtype=float)
+        res = report(f"asset {a}", R[:, :, j], Gj, idx_r, idx_g, mixed)
+        paths.append(figure(R[:, :, j], Gj, *res, idx_r, f"asset {a}", f"{stem}_{a}.png"))
+    if not args.no_assets_summary:
+        nb = args.n_boot_assets
+        asset_summary(R, G, names, idx_r[:nb], idx_g[:nb], mixed)
     print("\nSaved: " + ", ".join(paths))
 
 
@@ -248,6 +439,13 @@ def main():
     ap.add_argument("--prices", action="store_true", help="input is prices, not returns")
     ap.add_argument("--weights", default=None, help="comma-separated weights (default: equal)")
     ap.add_argument("--assets", nargs="+", default=None, help="also these columns (VALORs)")
+    ap.add_argument("--n-boot", type=int, default=200, help="bootstrap replicates")
+    ap.add_argument("--n-boot-assets", type=int, default=100,
+                    help="replicates per asset in the all-assets summary (<= --n-boot)")
+    ap.add_argument("--block", type=int, default=250,
+                    help="block length in rows (trading days) of the real-data bootstrap")
+    ap.add_argument("--no-assets-summary", action="store_true", help="skip the all-assets summary")
+    ap.add_argument("--seed", type=int, default=0)
     add_split_args(ap)
     add_split_source_args(ap)
     add_selection_args(ap, "real windows")
