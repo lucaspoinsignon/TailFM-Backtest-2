@@ -161,6 +161,9 @@ def main():
     device = a.device or ("cuda" if torch.cuda.is_available() else "cpu")
     kw = dict(n_steps=a.ode_steps or cfg.get("ode_steps", 100), mix_dim=cfg["mix_dim"],
               device=device, seed=seed)
+    if cfg.get("source", "t") == "skew":           # the source the run was trained with
+        kw["skew"] = (torch.tensor(np.load(os.path.join(a.run, "source_dir.npy")),
+                                   dtype=torch.float32), cfg["skew_kappa"])
 
     marg = pickle.load(open(os.path.join(a.run, "marginals.pkl"), "rb"))
     f, n = len(marg.marginals_), cfg["n"]
@@ -173,7 +176,8 @@ def main():
         raise SystemExit(f"{a.data} has {r.shape[1]} columns, the run was trained on {f}")
     x_real = r.mean(axis=1)                                   # equal-weight 1-day P&L
     print(f"run {a.run}: f={f}, n={n}, {'conditional on ' + str(cfg.get('cond_valor')) if is_cond else 'unconditional'}"
-          f" | num={a.num}, seed={seed}, ode_steps={kw['n_steps']}, device={device}")
+          f" | num={a.num}, seed={seed}, ode_steps={kw['n_steps']}, device={device}"
+          + (f" | skewed source, kappa={cfg['skew_kappa']:.4f}" if "skew" in kw else ""))
 
     # ------------------------------------------------- what to generate
     plans = []                                                # (cond, suffix, sidecar, real days)
