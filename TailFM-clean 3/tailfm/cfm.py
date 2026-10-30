@@ -40,11 +40,9 @@ def train_cfm(model: VelocityField, data: torch.Tensor, nu: float,
               weight_decay: float = 1e-4, mix_dim: str = "window",
               device: str = "cpu", ema_decay: float = 0.999,
               log_every: int = 200, seed: int = 0,
-              cond: torch.Tensor | None = None,
-              skew: tuple | None = None) -> tuple[EMA, list[float]]:
+              cond: torch.Tensor | None = None) -> tuple[EMA, list[float]]:
     """Train v_theta on windows `data` of shape (N, n, f), in z-space.
-    `cond`: optional (N,) regime value in [0, 1] for each window.
-    `skew`: optional (b, kappa) of an asymmetric source (base.sample_base)."""
+    `cond`: optional (N,) regime value in [0, 1] for each window."""
     torch.manual_seed(seed)
     model = model.to(device).train()
     data = data.to(device)
@@ -57,7 +55,7 @@ def train_cfm(model: VelocityField, data: torch.Tensor, nu: float,
     for step in range(1, steps + 1):
         idx = torch.randint(0, N, (batch_size,), device=device)
         x1, c1 = data[idx], (None if cond is None else cond[idx])
-        x0 = sample_base(batch_size, n, f, nu, mix_dim=mix_dim, device=device, skew=skew)
+        x0 = sample_base(batch_size, n, f, nu, mix_dim=mix_dim, device=device)
         t = torch.rand(batch_size, 1, 1, device=device)
         xt = (1.0 - t) * x0 + t * x1
         loss = ((model(xt, t, c1) - (x1 - x0)) ** 2).mean()
@@ -78,16 +76,16 @@ def train_cfm(model: VelocityField, data: torch.Tensor, nu: float,
 def sample(model: VelocityField, num: int, n: int, f: int, nu: float,
            n_steps: int = 100, mix_dim: str = "window", device: str = "cpu",
            batch_size: int = 512, seed: int = 0,
-           cond=None, skew: tuple | None = None) -> torch.Tensor:
+           cond=None) -> torch.Tensor:
     """Draw `num` windows by Heun integration of dx/dt = v_theta(x, t), t: 0 -> 1.
     `cond`: regime u in [0, 1], one value for all windows or an array of `num` values
-    (None for an unconditional model).  `skew`: the source the model was trained with."""
+    (None for an unconditional model)."""
     torch.manual_seed(seed)
     model = model.to(device).eval()
     out = []
     for start in range(0, num, batch_size):
         b = min(batch_size, num - start)
-        x = sample_base(b, n, f, nu, mix_dim=mix_dim, device=device, skew=skew)
+        x = sample_base(b, n, f, nu, mix_dim=mix_dim, device=device)
         c = None if cond is None else torch.as_tensor(
             cond, dtype=torch.float32, device=device).expand(num)[start:start + b]
         dt = 1.0 / n_steps
