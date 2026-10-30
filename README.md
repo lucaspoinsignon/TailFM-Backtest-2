@@ -40,4 +40,11 @@ bash folds_skew.sh
 python pooled_ci.py --folds folds_skew.json | tee pooled_skew.txt
 
 
+
+df -h .     # need about 8 GB: 2 samples of ~0.95 GB for each of folds 2–5
+(echo "set -e"; awk '/^# fold 2/{f=1} f' folds_skew.sh | sed '/--outdir runs\/skewfold2$/d') > folds_skew_rest.sh
+bash folds_skew_rest.sh
+python pooled_ci.py --folds folds_skew.json | tee pooled_skew.txt
+
+
 ```
