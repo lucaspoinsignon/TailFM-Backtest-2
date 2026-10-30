@@ -30,7 +30,8 @@ unconditional.
 Writes into --outdir:
     split.json          training / held-out rows
     model_ema.pt        EMA weights of the velocity field
-    model_config.json   architecture + conditioning, read by generate.py
+    model_config.json   architecture + conditioning + source, read by generate.py
+    source_dir.npy      market direction b of the skewed source        (--source skew)
     marginals.pkl       EVT marginals (returns <-> t_nu latent space)
     holdout.json        the held-out periods            (--holdout-level / --holdout-band)
     cond_u.npy          regime u of every day          (conditional runs)
@@ -55,6 +56,7 @@ from regime import (describe_ranges, holdout_ranges, level_band, load_dates,
 from run_logging import tee_output
 from splits import add_split_args, build_split
 from tailfm import MarginalEnsemble, VelocityField, train_cfm
+from tailfm.base import asymmetry, fit_skew
 
 
 def parse_args():
@@ -107,6 +109,10 @@ def parse_args():
     ap.add_argument("--depth", type=int, default=4)
     ap.add_argument("--mix-dim", default="window", choices=["window", "time"],
                     help="coordinates sharing the base mixing variable W")
+    ap.add_argument("--source", default="t", choices=["t", "skew"],
+                    help="t: elliptical Student-t source (symmetric).  skew: two-piece "
+                         "along the market direction of the latent training rows, with "
+                         "kappa^2 = their 5%% quantile asymmetry (tailfm/base.py)")
     ap.add_argument("--device", type=str, default=None)
     ap.add_argument("--cond-valor", type=str, default=None,
                     help="VALOR (CSV column name) whose EWMA vol is the regime; turns "
@@ -198,17 +204,30 @@ def run(args):
     z = torch.tensor(marg.transform(real), dtype=torch.float32)
     print(f"PIT: max|z| = {np.abs(z.numpy()).max():.1f} (correct fits stay under ~100)")
 
+    # ------------------------------------------------------------------ source
+    skew, src = None, dict(source="t")
+    if args.source == "skew":
+        z_rows = marg.transform(train_r)
+        b, kappa = fit_skew(z_rows)
+        skew = (torch.tensor(b, dtype=torch.float32), kappa)
+        np.save(f"{args.outdir}/source_dir.npy", b)
+        src = dict(source="skew", skew_kappa=kappa)
+        s = z_rows @ b
+        print(f"source: two-piece along the market direction (sum b = {b.sum():.2f}), "
+              f"kappa = {kappa:.4f}; latent market scores A(5%) = {asymmetry(s, 0.05):.3f}, "
+              f"A(1%) = {asymmetry(s, 0.01):.3f}; source A(p) = kappa^2 = {kappa ** 2:.3f}")
+
     # --------------------------------------------------------------- training
     torch.manual_seed(args.seed)    # reproducible initialisation (as conditional runs had)
     model = VelocityField(f=f, n_max=args.n, d_model=args.d_model, depth=args.depth,
                           pos_std=args.pos_std, cond=cond is not None)
     ema, _ = train_cfm(model, z, nu=marg.nu_, steps=args.steps,
                        batch_size=args.batch, mix_dim=args.mix_dim,
-                       device=device, seed=args.seed, cond=cond)
+                       device=device, seed=args.seed, cond=cond, skew=skew)
     torch.save(ema.shadow.state_dict(), f"{args.outdir}/model_ema.pt")
     json.dump(dict(n=args.n, d_model=args.d_model, depth=args.depth,
                    pos_std=args.pos_std, mix_dim=args.mix_dim, cond=cond is not None,
-                   cond_valor=args.cond_valor, ewma_lam=args.ewma_lam, seed=args.seed),
+                   cond_valor=args.cond_valor, ewma_lam=args.ewma_lam, seed=args.seed, **src),
               open(f"{args.outdir}/model_config.json", "w"), indent=2)
     pickle.dump(marg, open(f"{args.outdir}/marginals.pkl", "wb"))
 
