@@ -115,22 +115,76 @@ class SemiParametricMarginal:
         return self.ppf(stats.t.cdf(np.asarray(z, dtype=float), df=self.nu))
 
 
+class EmpiricalMarginal(SemiParametricMarginal):
+    """Marginal for money-market innovations (money_market.py): the empirical
+    distribution itself, without EVT tails.  These series are mostly tied values
+    (rounding, days with nothing but the carry) plus rare jumps; a GPD fitted to the top
+    5% mixes the two and extrapolates absurdly (a 0.01 bp rounding grid gets xi > 1).
+    So F is the empirical step function with its atoms, the PIT is randomised inside each
+    atom,
+
+        U = F(x-) + V (F(x) - F(x-)),   V ~ U(0, 1),
+
+    which is exactly uniform for a discrete or mixed law (the interpolated PIT above would
+    send every tied value to one end of its atom), and the inverse is the quantile function
+    F^{-1}(p) = min{x : F(x) >= p}: generated values are observed values with their
+    observed frequencies, never beyond the observed range.  V comes from a generator
+    seeded with `seed`, one per feature: reproducible and independent across features.
+    No GPD, so xi / beta are NaN and the xi pooling leaves these features out."""
+
+    def __init__(self, q_tail: float = 0.05, nu: float = 5.0, seed: int = 0):
+        super().__init__(q_tail, nu)
+        self.seed = int(seed)
+
+    def fit(self, x: np.ndarray) -> "EmpiricalMarginal":
+        x = np.asarray(x, dtype=float).ravel()
+        self.n_ = x.size
+        vals, cnt = np.unique(x, return_counts=True)
+        self._vals = vals
+        self._Fr = np.cumsum(cnt) / x.size                          # F(v)
+        self._Fl = self._Fr - cnt / x.size                          # F(v-)
+        self.u_lo_, self.u_hi_ = float(vals[0]), float(vals[-1])
+        self.q_lo_ = self.q_hi_ = 0.0
+        self.xi_lo_ = self.xi_hi_ = self.beta_lo_ = self.beta_hi_ = np.nan
+        self.n_exc_lo_ = self.n_exc_hi_ = 0
+        return self
+
+    def cdf(self, x: np.ndarray) -> np.ndarray:
+        i = np.searchsorted(self._vals, np.asarray(x, dtype=float), side="right") - 1
+        return np.clip(np.where(i >= 0, self._Fr[np.maximum(i, 0)], 0.0), _EPS, 1.0 - _EPS)
+
+    def ppf(self, p: np.ndarray) -> np.ndarray:
+        p = np.clip(np.asarray(p, dtype=float), _EPS, 1.0 - _EPS)
+        return self._vals[np.minimum(np.searchsorted(self._Fr, p), self._vals.size - 1)]
+
+    def transform(self, x: np.ndarray) -> np.ndarray:
+        x = np.asarray(x, dtype=float)
+        u = self.cdf(x)
+        i = np.minimum(np.searchsorted(self._vals, x), self._vals.size - 1)
+        v = np.random.default_rng(self.seed).random(x.shape)
+        u = np.where(self._vals[i] == x, self._Fl[i] + v * (self._Fr[i] - self._Fl[i]), u)
+        return stats.t.ppf(np.clip(u, _EPS, 1.0 - _EPS), df=self.nu)
+
+
 class MarginalEnsemble:
     """Per-feature SemiParametricMarginal for arrays shaped (..., f)."""
 
     def __init__(self, q_tail: float = 0.05, nu: float = 5.0):
         self.q_tail, self.nu = float(q_tail), float(nu)
 
-    def fit(self, x: np.ndarray) -> "MarginalEnsemble":
+    def fit(self, x: np.ndarray, discrete=()) -> "MarginalEnsemble":
+        """`discrete`: indices of money-market innovation features, given an
+        EmpiricalMarginal."""
         x = np.asarray(x, dtype=float)
         f = x.shape[-1]
         cols = x.reshape(-1, f)
         self.nu_ = self.nu
         self.marginals_ = []
         for j in range(f):
+            m = (EmpiricalMarginal(self.q_tail, self.nu_, seed=j) if j in set(discrete)
+                 else SemiParametricMarginal(self.q_tail, self.nu_))
             try:
-                self.marginals_.append(
-                    SemiParametricMarginal(self.q_tail, self.nu_).fit(cols[:, j]))
+                self.marginals_.append(m.fit(cols[:, j]))
             except ValueError as e:      # name the offending column
                 raise ValueError(f"feature index {j}: {e}") from None
         return self
