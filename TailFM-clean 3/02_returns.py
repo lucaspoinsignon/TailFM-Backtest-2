@@ -6,17 +6,20 @@ Four filters, each removing series that break something downstream: non-positive
 prices (log undefined), poor calendar coverage, a high zero-return fraction (stale or
 coarsely quantised quotes), and too few exceedances for the GPD fits in tailfm.evt.
 
-Money market (--mm-data, a second price panel of the same format):
+Money market: the VALORs given by --mm (columns of --data, or a .txt file listing them,
+one per line) and/or every column of --mm-data (a second price panel, same format):
 
     python 02_returns.py --data data/prices.csv --mm-data data/prices_panel_2000.csv \\
         --out data/returns_mm.csv
+    python 02_returns.py --data data/prices.csv --mm data/mm_valors.txt --out data/returns_mm.csv
+    python 02_returns.py --data data/prices.csv --mm 4157124 4157176 --out data/returns_mm.csv
 
-Its prices are carried forward onto the dates of --data (a fund's own holidays are not
+Their prices are carried forward onto the dates of --data (a fund's own holidays are not
 missing data), so they never remove rows; a VALOR must have a positive price on the
 first date.  Their log returns are split into carry + innovation (money_market.py): the
 zero-return and exceedance filters are applied to the innovations instead, and a VALOR
 failing them is kept as "carry only" rather than dropped.  Writes <out>.json and
-<out>_carry.csv next to <out>; without --mm-data nothing changes.
+<out>_carry.csv next to <out>; without --mm / --mm-data nothing changes.
 """
 
 from __future__ import annotations
@@ -53,6 +56,9 @@ def main():
                    help="must match train_tailfm.py --q-tail")
     p.add_argument("--min-exceedances", type=int, default=30)
     p.add_argument("--test-frac", type=float, default=0.2)
+    p.add_argument("--mm", nargs="+", default=None, metavar="VALOR",
+                   help="money-market VALORs among the columns of --data, or one .txt "
+                        "file listing them (see the docstring)")
     p.add_argument("--mm-data", default=None,
                    help="price panel of money-market VALORs (see the docstring)")
     p.add_argument("--carry-window", type=int, default=5,
@@ -67,6 +73,23 @@ def main():
         px = px[px.index <= pd.Timestamp(a.end)]
     print(f"{a.data}: {px.shape[0]} dates x {px.shape[1]} VALOR  "
           f"{px.index[0].date()} -> {px.index[-1].date()}")
+
+    # ---- money-market columns of --data: set aside, handled below with --mm-data
+    mm_parts = []
+    if a.mm:
+        ids = (open(a.mm[0]).read().replace(",", " ").split()
+               if len(a.mm) == 1 and a.mm[0].endswith(".txt") else a.mm)
+        ids = list(dict.fromkeys(str(v).strip() for v in ids))
+        missing = [v for v in ids if v not in px.columns]
+        if missing:
+            raise SystemExit(f"--mm: not columns of {a.data}: {missing}")
+        mm_parts.append(px[ids])
+        n0 = len(px)
+        px = px.drop(columns=ids).dropna(how="all")      # dates priced by funds only
+        print(f"--mm: {len(ids)} money-market VALOR taken out of {a.data} "
+              f"({n0 - len(px)} dates with no other price dropped)")
+    if a.mm_data:
+        mm_parts.append(pd.read_csv(a.mm_data, index_col=0, parse_dates=True).sort_index())
 
     # ---- non-positive prices
     npf = (px <= 0).sum() / px.notna().sum()
@@ -95,12 +118,13 @@ def main():
 
     # ---- money market: carried forward onto these dates
     mm_cols = []
-    if a.mm_data:
-        mm = pd.read_csv(a.mm_data, index_col=0, parse_dates=True).sort_index()
+    if mm_parts:
+        mm = pd.concat(mm_parts, axis=1).sort_index()
         mm.columns = [str(c) for c in mm.columns]
         clash = [c for c in mm.columns if c in px.columns]
-        if clash:
-            raise SystemExit(f"{a.mm_data}: VALOR also in --data: {clash}")
+        if clash or mm.columns.duplicated().any():
+            raise SystemExit(f"money-market VALOR also among the equities or given twice: "
+                             f"{clash or list(mm.columns[mm.columns.duplicated()])}")
         mm = mm.mask(mm <= 0)
         # date of each fund's latest own price, as of every row: carry accrues between them
         own = pd.DataFrame({c: pd.Series(mm.index, index=mm.index).where(mm[c].notna())
@@ -114,8 +138,7 @@ def main():
         mm, own = mm.loc[:, ~late], own.loc[:, ~late]
         mm_cols = list(mm.columns)
         px = px.join(mm)
-        print(f"money market: {len(mm_cols)} VALOR from {a.mm_data}, carried forward "
-              f"onto these {len(px)} dates")
+        print(f"money market: {len(mm_cols)} VALOR, carried forward onto these {len(px)} dates")
 
     ret = np.log(px / px.shift(1)).dropna(how="any")
     print(f"returns: {ret.shape[0]} x {ret.shape[1]}")
@@ -165,7 +188,7 @@ def main():
         carry.to_csv(carry_path(a.out), float_format="%.8e")
         with open(meta_path(a.out), "w") as fh:
             json.dump(dict(mm_model=model, mm_carry_only=only, carry_window=a.carry_window,
-                           mm_data=a.mm_data,
+                           mm_data=a.mm_data, mm=a.mm,
                            accrual_last={c: float(v) for c, v in acc_last.items()}),
                       fh, indent=2)
         print(f"wrote {meta_path(a.out)} and {carry_path(a.out)}: {len(model)} modelled, "
