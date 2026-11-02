@@ -6,9 +6,11 @@ Four filters, each removing series that break something downstream: non-positive
 prices (log undefined), poor calendar coverage, a high zero-return fraction (stale or
 coarsely quantised quotes), and too few exceedances for the GPD fits in tailfm.evt.
 
-Money market: the VALORs given by --mm (columns of --data, or a .txt file listing them,
-one per line) and/or every column of --mm-data (a second price panel, same format):
+Money market: the VALORs listed in MM_VALORS below (columns of --data), or instead those
+given by --mm (VALORs, or a .txt file listing them), and/or every column of --mm-data (a
+second price panel, same format):
 
+    python 02_returns.py --data data/prices.csv --out data/returns_mm.csv     # MM_VALORS
     python 02_returns.py --data data/prices.csv --mm-data data/prices_panel_2000.csv \\
         --out data/returns_mm.csv
     python 02_returns.py --data data/prices.csv --mm data/mm_valors.txt --out data/returns_mm.csv
@@ -31,6 +33,14 @@ import numpy as np
 import pandas as pd
 
 from money_market import carry_only, carry_path, meta_path, split_carry
+
+# Money-market VALORs (column names of --data, as strings).  Their returns are split into
+# carry + innovation; listed VALORs missing from --data are ignored with a warning.
+# Empty: no money market.  --mm on the command line replaces this list.
+MM_VALORS = [
+    # "4157124",
+    # "4157176",
+]
 
 
 def report(cols, stat, why, unit=""):
@@ -76,13 +86,16 @@ def main():
 
     # ---- money-market columns of --data: set aside, handled below with --mm-data
     mm_parts = []
-    if a.mm:
-        ids = (open(a.mm[0]).read().replace(",", " ").split()
-               if len(a.mm) == 1 and a.mm[0].endswith(".txt") else a.mm)
+    ids = a.mm if a.mm is not None else MM_VALORS
+    if ids:
+        if len(ids) == 1 and ids[0].endswith(".txt"):
+            ids = open(ids[0]).read().replace(",", " ").split()
         ids = list(dict.fromkeys(str(v).strip() for v in ids))
         missing = [v for v in ids if v not in px.columns]
         if missing:
-            raise SystemExit(f"--mm: not columns of {a.data}: {missing}")
+            print(f"WARNING: money-market VALOR not in {a.data}, ignored: {missing}")
+        ids = [v for v in ids if v in px.columns]
+    if ids:
         mm_parts.append(px[ids])
         n0 = len(px)
         px = px.drop(columns=ids).dropna(how="all")      # dates priced by funds only
