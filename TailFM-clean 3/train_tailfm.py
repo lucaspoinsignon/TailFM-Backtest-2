@@ -5,7 +5,9 @@
         --train-all --outdir runs/u090
 
 Input is a CSV (one column per feature, optional header, rows = time steps) or a .npy
-array of shape (T, f), holding log returns unless --prices is passed.
+array of shape (T, f), holding log returns unless --prices is passed.  A CSV written by
+02_returns.py --mm-data has money-market innovations in some columns, listed in the
+.json next to it (money_market.py): those get empirical marginals, no EVT.
 
 Pipeline: split (splits.py) -> EVT marginals on the training rows with pooled xi -> PIT
 to t_nu -> conditional flow matching on the training windows.
@@ -50,6 +52,7 @@ import torch
 
 from csvio import load_returns, feature_names_from_csv
 from evt_shrink import shrink_ensemble
+from money_market import meta_path, read_meta
 from regime import (describe_ranges, holdout_ranges, level_band, load_dates,
                     mask_to_ranges, period_mask, regime_u)
 from run_logging import tee_output
@@ -185,16 +188,25 @@ def run(args):
     # -------------------------------------------------- EVT marginals + PIT
     # fitted on the training ROWS, not on `real`: windows overlap at stride 1, so
     # every interior date would be counted ~n times in the exceedance counts
-    marg = MarginalEnsemble(q_tail=args.q_tail, nu=args.nu).fit(train_r)
+    # money-market columns (innovations, 02_returns.py --mm-data): empirical marginals,
+    # no EVT, so they stay out of the xi pooling
+    mm = read_meta(args.data)
+    disc = [names.index(v) for v in mm["mm_model"]] if mm else []
+    if mm:
+        print(f"money market ({meta_path(args.data)}): {len(disc)} innovation columns with "
+              f"empirical marginals (no EVT); {len(mm['mm_carry_only'])} carry-only VALOR "
+              f"not in the data")
+    marg = MarginalEnsemble(q_tail=args.q_tail, nu=args.nu).fit(train_r, discrete=disc)
     if not args.no_shrink:
         print("EVT: pooling xi across features (empirical Bayes)")
-        shrink_ensemble(marg, train_r, c=args.shrink_c)
+        shrink_ensemble(marg, train_r, c=args.shrink_c,
+                        groups=[np.setdiff1d(np.arange(f), disc)] if disc else None)
     su = marg.summary()
     print(f"EVT: nu={marg.nu_:.2f}, q_tail={args.q_tail}, "
-          f"xi_lower median {np.median(su['xi_lo']):+.3f} "
-          f"[{su['xi_lo'].min():+.3f}, {su['xi_lo'].max():+.3f}], "
-          f"xi_upper median {np.median(su['xi_hi']):+.3f} "
-          f"[{su['xi_hi'].min():+.3f}, {su['xi_hi'].max():+.3f}]")
+          f"xi_lower median {np.nanmedian(su['xi_lo']):+.3f} "
+          f"[{np.nanmin(su['xi_lo']):+.3f}, {np.nanmax(su['xi_lo']):+.3f}], "
+          f"xi_upper median {np.nanmedian(su['xi_hi']):+.3f} "
+          f"[{np.nanmin(su['xi_hi']):+.3f}, {np.nanmax(su['xi_hi']):+.3f}]")
     z = torch.tensor(marg.transform(real), dtype=torch.float32)
     print(f"PIT: max|z| = {np.abs(z.numpy()).max():.1f} (correct fits stay under ~100)")
 
