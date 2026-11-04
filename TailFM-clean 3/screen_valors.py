@@ -20,8 +20,10 @@ BAD = accrual or xi (the fit is invalid); WARN = persistent, jumps, zero fractio
 sd below --sd-bp (near-riskless), or |corr| > --dup-corr with an earlier column (duplicate).
 Writes screen.csv (one row per VALOR), screen.png (price, returns and the lower-tail
 exceedances with their GPD fit, for the --plot VALORs then the flagged ones), drop.txt (BAD
-and near-riskless, for drop_valors.py --file), weights_clean.txt (equal weight on the VALORs
-not in drop.txt) and, with --reference, weights_reference.txt (equal weight on the VALORs of
+and near-riskless, for drop_valors.py --file), duplicates.txt (the later VALOR of each
+duplicate pair, same format, with the partner and corr as a comment), weights_clean.txt
+(equal weight on the VALORs not in drop.txt) and, with --reference, weights_reference.txt
+(equal weight on the VALORs of
 that CSV), for --weights of evaluate.py / run_backtest.py.
 """
 
@@ -174,12 +176,15 @@ def main():
     print("BAD: " + ",".join(tab.valor[tab.status == "BAD"]))
     drop = list(tab.valor[(tab.status == "BAD") | (tab.sd_bp < a.sd_bp)])
     print(f"drop.txt ({len(drop)}, BAD + sd < {a.sd_bp}bp): " + ",".join(drop))
-    dups = tab[tab.why.str.contains("duplicate")]
+    dups = tab[tab.why.str.contains("duplicate") & ~tab.valor.isin(drop)]
+    dup_of = [w.split("duplicate of ")[1].split(";")[0] for w in dups.why]
     if len(dups):
-        print("duplicates (decide which to keep): "
-              + "; ".join(f"{v}: {w.split('duplicate of ')[1].split(';')[0]}" for v, w in zip(dups.valor, dups.why)))
+        print(f"duplicates.txt ({len(dups)}, the later column of each pair; delete the lines "
+              f"you want to keep): " + "; ".join(f"{v}: {d}" for v, d in zip(dups.valor, dup_of)))
     with open(os.path.join(a.out, "drop.txt"), "w") as fh:
         fh.write("\n".join(drop) + "\n")
+    with open(os.path.join(a.out, "duplicates.txt"), "w") as fh:
+        fh.write("".join(f"{v}  # {d}\n" for v, d in zip(dups.valor, dup_of)))
 
     extra = [s.strip() for s in a.plot.split(",") if s.strip()]
     missing = [v for v in extra if v not in r.columns]
@@ -194,7 +199,7 @@ def main():
         keep = np.array([c in ref for c in cols])
         write_weights(cols, keep, os.path.join(a.out, "weights_reference.txt"))
         print(f"weights_reference.txt: {keep.sum()} VALORs of {a.reference}")
-    print(f"wrote {a.out}/screen.csv, screen.png, drop.txt, weights_clean.txt"
+    print(f"wrote {a.out}/screen.csv, screen.png, drop.txt, duplicates.txt, weights_clean.txt"
           + (", weights_reference.txt" if a.reference else ""))
 
 
