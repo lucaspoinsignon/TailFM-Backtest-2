@@ -124,12 +124,18 @@ def main():
         print("    pooling xi across features (empirical Bayes):")
         shrink_ensemble(marg, tr, c=a.shrink_c)
     su = marg.summary()
-    print(f"    exceedances: lower {su['n_exc_lo'].min()}-{su['n_exc_lo'].max()}, "
-          f"upper {su['n_exc_hi'].min()}-{su['n_exc_hi'].max()}")
-    for side, xi in (("lower", su["xi_lo"]), ("upper", su["xi_hi"])):
+    g = ~su["empirical"]
+    print(f"    exceedances: lower {su['n_exc_lo'][g].min()}-{su['n_exc_lo'][g].max()}, "
+          f"upper {su['n_exc_hi'][g].min()}-{su['n_exc_hi'][g].max()}")
+    for side, xi in (("lower", su["xi_lo"][g]), ("upper", su["xi_hi"][g])):
         print(f"    xi_{side}: median {np.median(xi):+.3f}  "
               f"[{xi.min():+.3f}, {xi.max():+.3f}]  "
               f"| xi>1: {int((xi > 1).sum())}  xi<0: {int((xi < 0).sum())}")
+    emp = np.flatnonzero(su["empirical"])
+    if emp.size:
+        warn(f"{emp.size} features get empirical tails (one-signed, or xi_hat outside "
+             f"(-0.5, 1)): no GPD, generated values stay in the sample range: "
+             + ", ".join(names[j] for j in emp))
 
     # ---- PIT ----------------------------------------------------------------
     z = marg.transform(tr)
