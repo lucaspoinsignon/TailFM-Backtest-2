@@ -53,28 +53,34 @@ def conditional_recalibrator(model, marg, num, n, f, **kw):
     phi_j is piecewise linear through (mixture order statistic k, t_nu quantile
     k/(K+1)) and linear beyond the mixture's range, with the slope of its outer 1%:
     both tails are t-like, so the map is asymptotically a rescaling there.  The GPD
-    tails of F_hat_j then extrapolate smoothly, with no ties and no cap."""
+    tails of F_hat_j then extrapolate smoothly, with no ties and no cap.
+
+    One map per position k and feature j: real windows have the same marginal at every
+    position, but the flow's distortion does not (position_check.py: the first and last
+    days too wide, the middle too narrow), so a map pooled over positions would leave
+    day 1 -- the day every 1-day score uses -- miscalibrated."""
     u_mix = (np.arange(num) + 0.5) / num
-    zs = np.sort(sample(model, num, n, f, nu=marg.nu_, cond=u_mix, **kw).numpy()
-                 .reshape(-1, f), axis=0)
-    K = zs.shape[0]
+    zs = np.sort(sample(model, num, n, f, nu=marg.nu_, cond=u_mix, **kw).numpy(), axis=0)
+    K = zs.shape[0]                                # (K, n, f): order statistics per (k, j)
     tq = stats.t.ppf(np.arange(1, K + 1) / (K + 1.0), df=marg.nu_)
     m = max(K // 100, 1)
     k1, k2 = int(0.005 * K), int(0.995 * K)
     print(f"flow marginals before recalibration (u-mixture, z-space): median ratio of "
           f"the 0.5% / 99.5% quantile to t_nu = {np.median(zs[k1] / tq[k1]):.3f} / "
-          f"{np.median(zs[k2] / tq[k2]):.3f}  (1 = exact)")
+          f"{np.median(zs[k2] / tq[k2]):.3f}  (1 = exact); day 1: "
+          f"{np.median(zs[k1, 0] / tq[k1]):.3f} / {np.median(zs[k2, 0] / tq[k2]):.3f}")
 
     def recal(z):
-        flat = z.reshape(-1, f).astype(float)
-        for j in range(f):
-            zj, x = zs[:, j], flat[:, j]
-            y = np.interp(x, zj, tq)
-            lo, hi = x < zj[0], x > zj[-1]
-            y[lo] = tq[0] + (x[lo] - zj[0]) * (tq[m] - tq[0]) / (zj[m] - zj[0])
-            y[hi] = tq[-1] + (x[hi] - zj[-1]) * (tq[-1] - tq[-1 - m]) / (zj[-1] - zj[-1 - m])
-            flat[:, j] = y
-        return flat.reshape(z.shape)
+        out = np.empty(z.shape)
+        for k in range(n):
+            for j in range(f):
+                zj, x = zs[:, k, j], z[:, k, j].astype(float)
+                y = np.interp(x, zj, tq)
+                lo, hi = x < zj[0], x > zj[-1]
+                y[lo] = tq[0] + (x[lo] - zj[0]) * (tq[m] - tq[0]) / (zj[m] - zj[0])
+                y[hi] = tq[-1] + (x[hi] - zj[-1]) * (tq[-1] - tq[-1 - m]) / (zj[-1] - zj[-1 - m])
+                out[:, k, j] = y
+        return out
     return recal
 
 
@@ -91,21 +97,23 @@ def generation_plan(level, band, num: int, seed: int):
 
 
 def rank_recalibrate(gen, marg):
-    """x -> F_hat_j^{-1}(rank/(K+1)): each generated marginal becomes exactly F_hat_j and
-    the learned copula is left invariant (Sklar).  Unconditional runs only."""
+    """x -> F_hat_j^{-1}(rank/(K+1)) at each position k separately: every (k, j) marginal
+    becomes exactly F_hat_j, as it is for real windows, and the learned copula is left
+    invariant (Sklar).  Unconditional runs only."""
     num, n, f = gen.shape
-    flat = gen.reshape(-1, f)
-    K = flat.shape[0]
+    K = num
     rank = np.arange(1, K + 1, dtype=float) / (K + 1.0)
-    for a in range(0, f, 32):                      # column blocks
-        b = min(a + 32, f)
-        blk = np.ascontiguousarray(flat[:, a:b].T)
-        idx = np.argsort(blk, axis=1)
-        u = np.empty(blk.shape)
-        np.put_along_axis(u, idx, np.broadcast_to(rank, blk.shape), axis=1)
-        for j in range(a, b):
-            flat[:, j] = marg.marginals_[j].ppf(u[j - a])
-    return flat.reshape(num, n, f)
+    for k in range(n):
+        flat = gen[:, k, :]                        # view: (K, f) at position k
+        for a in range(0, f, 32):                  # column blocks
+            b = min(a + 32, f)
+            blk = np.ascontiguousarray(flat[:, a:b].T)
+            idx = np.argsort(blk, axis=1)
+            u = np.empty(blk.shape)
+            np.put_along_axis(u, idx, np.broadcast_to(rank, blk.shape), axis=1)
+            for j in range(a, b):
+                flat[:, j] = marg.marginals_[j].ppf(u[j - a])
+    return gen
 
 
 def pnl_stats(x):
