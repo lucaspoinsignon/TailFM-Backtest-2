@@ -88,24 +88,24 @@ def sample2(model, num, n, f, nu, cond, n_steps=100, mix_dim="window", device="c
 def recalibrator(model, marg, cond_mix, n, f, **kw):
     """generate.conditional_recalibrator for any condition: the mixture over `cond_mix`
     (the training conditions) is mapped to exact t_nu marginals by a monotone per-feature
-    map, linear beyond the mixture's range."""
+    map per position and feature, linear beyond the mixture's range."""
     num = len(cond_mix)
-    zs = np.sort(sample2(model, num, n, f, marg.nu_, cond_mix, **kw).numpy()
-                 .reshape(-1, f), axis=0)
-    K = zs.shape[0]
+    zs = np.sort(sample2(model, num, n, f, marg.nu_, cond_mix, **kw).numpy(), axis=0)
+    K = zs.shape[0]                                # (K, n, f): order statistics per (k, j)
     tq = stats.t.ppf(np.arange(1, K + 1) / (K + 1.0), df=marg.nu_)
     m = max(K // 100, 1)
 
     def recal(z):
-        flat = z.reshape(-1, f).astype(float)
-        for j in range(f):
-            zj, x = zs[:, j], flat[:, j]
-            y = np.interp(x, zj, tq)
-            lo, hi = x < zj[0], x > zj[-1]
-            y[lo] = tq[0] + (x[lo] - zj[0]) * (tq[m] - tq[0]) / (zj[m] - zj[0])
-            y[hi] = tq[-1] + (x[hi] - zj[-1]) * (tq[-1] - tq[-1 - m]) / (zj[-1] - zj[-1 - m])
-            flat[:, j] = y
-        return flat.reshape(z.shape)
+        out = np.empty(z.shape)
+        for k in range(n):
+            for j in range(f):
+                zj, x = zs[:, k, j], z[:, k, j].astype(float)
+                y = np.interp(x, zj, tq)
+                lo, hi = x < zj[0], x > zj[-1]
+                y[lo] = tq[0] + (x[lo] - zj[0]) * (tq[m] - tq[0]) / (zj[m] - zj[0])
+                y[hi] = tq[-1] + (x[hi] - zj[-1]) * (tq[-1] - tq[-1 - m]) / (zj[-1] - zj[-1 - m])
+                out[:, k, j] = y
+        return out
     return recal
 
 
