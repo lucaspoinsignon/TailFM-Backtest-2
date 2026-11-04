@@ -101,9 +101,9 @@ def parse_args():
                     help="Efron-Morris cap on the xi pooling, in standard errors")
     ap.add_argument("--no-shrink", action="store_true",
                     help="disable pooling of xi across features")
-    ap.add_argument("--steps", type=int, default=20_000)
+    ap.add_argument("--steps", type=int, default=40_000)
     ap.add_argument("--batch", type=int, default=128)
-    ap.add_argument("--d-model", type=int, default=512)
+    ap.add_argument("--d-model", type=int, default=768)
     ap.add_argument("--depth", type=int, default=4)
     ap.add_argument("--mix-dim", default="window", choices=["window", "time"],
                     help="coordinates sharing the base mixing variable W")
