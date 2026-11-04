@@ -107,10 +107,13 @@ def run(args):
           f"{(m[starts] > 1).mean():.0%}")
 
     # ------------------------------------------------ EVT marginals + PIT (as train_tailfm)
-    marg = MarginalEnsemble(q_tail=args.q_tail, nu=args.nu).fit(train_r)
+    forced = [s.strip() for s in args.empirical_tails.split(",") if s.strip()]
+    marg = MarginalEnsemble(q_tail=args.q_tail, nu=args.nu,
+                            empirical=[names.index(v) for v in forced]).fit(train_r)
     if not args.no_shrink:
         shrink_ensemble(marg, train_r, c=args.shrink_c)
-    z = torch.tensor(marg.transform(real), dtype=torch.float32)
+    z = torch.tensor(split.train_windows(marg.transform(r), args.n, args.stride),
+                     dtype=torch.float32)
     print(f"PIT: max|z| = {np.abs(z.numpy()).max():.1f}")
 
     # --------------------------------------------------------------- training
