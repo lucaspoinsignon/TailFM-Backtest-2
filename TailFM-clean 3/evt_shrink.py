@@ -15,6 +15,12 @@ aimed at the k ~ 60 exceedances available at T ~ 1200, q = 0.05:
 
 beta is re-estimated by profile MLE at the new xi, so the pair stays a coherent
 maximiser rather than two estimates from different fits.
+
+Features with tails="empirical" (one-signed series, see tailfm.evt) are skipped, and a
+feature whose Zhang-Stephens xi_hat leaves (-0.5, 1) on either side is switched to them:
+xi >= 1 has no finite mean (ES undefined, absurd inverse-PIT losses) and xi <= -0.5 is a
+point mass at the threshold, not a tail.  Neither enters the pooling, so one degenerate
+series cannot inflate tau and switch the pooling off for every other feature.
 """
 
 from __future__ import annotations
@@ -44,8 +50,8 @@ def fit_gpd_zs(exc: np.ndarray) -> tuple[float, float]:
     bs += 1.0 / y[-1]
     xis = np.log1p(-bs[:, None] * y).mean(axis=1)          # xi(b) along the grid
     L = n * (np.log(-bs / xis) - xis - 1.0)                # profile log-likelihood
-    w = 1.0 / np.exp(L - L[:, None]).sum(axis=1)
-    w /= w.sum()
+    w = np.exp(L - L.max())                                # = 1 / sum_l exp(L_l - L_j),
+    w /= w.sum()                                           #   without the overflow
     b = float((bs * w).sum())
     xi = float(np.log1p(-b * y).mean())
     return xi, float(max(-xi / b, _EPS))
@@ -91,19 +97,26 @@ def exceedances(m, x_col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def shrink_ensemble(marg, x: np.ndarray, c: float = 1.0,
-                    xi_min: float | None = 0.0, verbose: bool = True) -> dict:
+                    xi_min: float | None = 0.0, xi_range=(-0.5, 1.0),
+                    verbose: bool = True) -> dict:
     """Re-estimate and pool the tails of a fitted MarginalEnsemble, in place.  `x` must
     be the array passed to marg.fit, since the thresholds are kept.
     """
     cols = np.asarray(x, dtype=float).reshape(-1, np.shape(x)[-1])
     m_list = marg.marginals_
-    f = len(m_list)
+    gpd = [j for j, m in enumerate(m_list) if getattr(m, "tails_", "gpd") == "gpd"]
 
-    exc = [exceedances(m_list[j], cols[:, j]) for j in range(f)]
-    xi_lo = np.array([fit_gpd_zs(e[0])[0] for e in exc])
-    xi_hi = np.array([fit_gpd_zs(e[1])[0] for e in exc])
-    k_lo = np.array([m.n_exc_lo_ for m in m_list], dtype=float)
-    k_hi = np.array([m.n_exc_hi_ for m in m_list], dtype=float)
+    exc = {j: exceedances(m_list[j], cols[:, j]) for j in gpd}
+    raw = {j: (fit_gpd_zs(exc[j][0])[0], fit_gpd_zs(exc[j][1])[0]) for j in gpd}
+    moved = [j for j in gpd if not all(xi_range[0] < r < xi_range[1] for r in raw[j])]
+    for j in moved:                                        # no valid tail: empirical
+        m = m_list[j]
+        m_list[j] = type(m)(m.q_tail, m.nu, "empirical").fit(cols[:, j])
+    keep = [j for j in gpd if j not in moved]
+    xi_lo = np.array([raw[j][0] for j in keep])
+    xi_hi = np.array([raw[j][1] for j in keep])
+    k_lo = np.array([m_list[j].n_exc_lo_ for j in keep], dtype=float)
+    k_hi = np.array([m_list[j].n_exc_hi_ for j in keep], dtype=float)
 
     new_lo, lam_lo, mu_lo, tau2_lo = eb_shrink_xi(xi_lo, k_lo, c)
     new_hi, lam_hi, mu_hi, tau2_hi = eb_shrink_xi(xi_hi, k_hi, c)
@@ -113,9 +126,11 @@ def shrink_ensemble(marg, x: np.ndarray, c: float = 1.0,
         new_lo = np.maximum(new_lo, xi_min)
         new_hi = np.maximum(new_hi, xi_min)
 
-    for j, m in enumerate(m_list):
-        m.xi_lo_, m.beta_lo_ = float(new_lo[j]), beta_profile(exc[j][0], new_lo[j])
-        m.xi_hi_, m.beta_hi_ = float(new_hi[j]), beta_profile(exc[j][1], new_hi[j])
+    for i, j in enumerate(keep):
+        m = m_list[j]
+        m.xi_lo_, m.beta_lo_ = float(new_lo[i]), beta_profile(exc[j][0], new_lo[i])
+        m.xi_hi_, m.beta_hi_ = float(new_hi[i]), beta_profile(exc[j][1], new_hi[i])
+    empirical = [j for j, m in enumerate(m_list) if getattr(m, "tails_", "gpd") == "empirical"]
 
     if verbose:
         for side, xi_r, xi_s, lam, mu, t2, k in (
@@ -129,7 +144,11 @@ def shrink_ensemble(marg, x: np.ndarray, c: float = 1.0,
                   f" -> {xi_s.min():+.3f},{xi_s.max():+.3f})")
         if xi_min is not None:
             print(f"  shape floor xi >= {xi_min:+.2f} applied to {n_floor} of "
-                  f"{2 * f} tails")
+                  f"{2 * len(keep)} tails")
+        print(f"  empirical tails: {len(empirical)} features ({len(empirical) - len(moved)} "
+              f"one-signed, {len(moved)} with xi_hat outside "
+              f"({xi_range[0]:+.1f}, {xi_range[1]:+.1f}))")
     return dict(xi_lo_raw=xi_lo, xi_hi_raw=xi_hi, xi_lo=new_lo, xi_hi=new_hi,
                 lam_lo=lam_lo, lam_hi=lam_hi, mu_lo=mu_lo, mu_hi=mu_hi,
-                tau2_lo=tau2_lo, tau2_hi=tau2_hi, n_floor=n_floor)
+                tau2_lo=tau2_lo, tau2_hi=tau2_hi, n_floor=n_floor,
+                pooled=keep, empirical=empirical, moved=moved)
