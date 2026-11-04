@@ -101,6 +101,10 @@ def parse_args():
                     help="Efron-Morris cap on the xi pooling, in standard errors")
     ap.add_argument("--no-shrink", action="store_true",
                     help="disable pooling of xi across features")
+    ap.add_argument("--empirical-tails", default="",
+                    help="comma-separated VALORs given empirical tails (no GPD, no "
+                         "extrapolation) on top of the automatic ones: one-signed series "
+                         "and xi_hat outside (-0.5, 1)")
     ap.add_argument("--steps", type=int, default=40_000)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--d-model", type=int, default=768)
@@ -185,17 +189,28 @@ def run(args):
     # -------------------------------------------------- EVT marginals + PIT
     # fitted on the training ROWS, not on `real`: windows overlap at stride 1, so
     # every interior date would be counted ~n times in the exceedance counts
-    marg = MarginalEnsemble(q_tail=args.q_tail, nu=args.nu).fit(train_r)
+    forced = [s.strip() for s in args.empirical_tails.split(",") if s.strip()]
+    if set(forced) - set(names):
+        raise SystemExit(f"--empirical-tails: not columns of {args.data}: "
+                         f"{sorted(set(forced) - set(names))}")
+    marg = MarginalEnsemble(q_tail=args.q_tail, nu=args.nu,
+                            empirical=[names.index(v) for v in forced]).fit(train_r)
     if not args.no_shrink:
         print("EVT: pooling xi across features (empirical Bayes)")
         shrink_ensemble(marg, train_r, c=args.shrink_c)
     su = marg.summary()
     print(f"EVT: nu={marg.nu_:.2f}, q_tail={args.q_tail}, "
-          f"xi_lower median {np.median(su['xi_lo']):+.3f} "
-          f"[{su['xi_lo'].min():+.3f}, {su['xi_lo'].max():+.3f}], "
-          f"xi_upper median {np.median(su['xi_hi']):+.3f} "
-          f"[{su['xi_hi'].min():+.3f}, {su['xi_hi'].max():+.3f}]")
-    z = torch.tensor(marg.transform(real), dtype=torch.float32)
+          f"xi_lower median {np.nanmedian(su['xi_lo']):+.3f} "
+          f"[{np.nanmin(su['xi_lo']):+.3f}, {np.nanmax(su['xi_lo']):+.3f}], "
+          f"xi_upper median {np.nanmedian(su['xi_hi']):+.3f} "
+          f"[{np.nanmin(su['xi_hi']):+.3f}, {np.nanmax(su['xi_hi']):+.3f}] (GPD tails)")
+    emp = np.flatnonzero(su["empirical"])
+    print(f"EVT: empirical tails (no GPD, sample range) for {emp.size} of {f} features"
+          + (": " + ", ".join(names[j] for j in emp) if emp.size else ""))
+    # every row once, then windows: a tie spread by the distributional transform keeps one
+    # z per day in all the windows that contain it
+    z_rows = marg.transform(r)
+    z = torch.tensor(split.train_windows(z_rows, args.n, args.stride), dtype=torch.float32)
     print(f"PIT: max|z| = {np.abs(z.numpy()).max():.1f} (correct fits stay under ~100)")
 
     # --------------------------------------------------------------- training
