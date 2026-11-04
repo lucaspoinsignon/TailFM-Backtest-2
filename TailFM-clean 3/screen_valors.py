@@ -15,12 +15,14 @@ quantile is a LOSS in the tail of a continuous law.  Four kinds of series break 
                 (an interest rate), not an innovation.
     jumps       max |r - median| / IQR > 50: flat series with rare jumps (stale NAV, resets).
 
-BAD = accrual or xi (the fit is invalid); WARN = persistent, jumps, zero fraction > 2%, or
-daily sd < 1bp.  Writes screen.csv (one row per VALOR), screen.png (price, returns and the
-lower-tail exceedances with their GPD fit, for every flagged VALOR), weights_clean.txt
-(equal weight on the non-BAD VALORs, 0 on the BAD ones) and, with --reference,
-weights_reference.txt (equal weight on the VALORs of that CSV), for --weights of
-evaluate.py / run_backtest.py.
+BAD = accrual or xi (the fit is invalid); WARN = persistent, jumps, zero fraction above
+--zero-frac (8%: holiday / ffill zeros of 2-6% are normal in a multi-market panel), daily
+sd below --sd-bp (near-riskless), or |corr| > --dup-corr with an earlier column (duplicate).
+Writes screen.csv (one row per VALOR), screen.png (price, returns and the lower-tail
+exceedances with their GPD fit, for the --plot VALORs then the flagged ones), drop.txt (BAD
+and near-riskless, for drop_valors.py --file), weights_clean.txt (equal weight on the VALORs
+not in drop.txt) and, with --reference, weights_reference.txt (equal weight on the VALORs of
+that CSV), for --weights of evaluate.py / run_backtest.py.
 """
 
 from __future__ import annotations
@@ -53,7 +55,19 @@ def fit_gpd_zs(y):
     return xi, -xi / bh
 
 
-def screen(r: pd.DataFrame, q: float) -> pd.DataFrame:
+def duplicates(r: pd.DataFrame, rho_max: float) -> dict:
+    """{later column: (earlier column, corr)} for every pair with |corr| > rho_max."""
+    C = np.corrcoef(r.to_numpy(dtype=float).T)
+    i, j = np.nonzero(np.triu(np.abs(C) > rho_max, 1))
+    out = {}
+    for a, b in zip(i, j):
+        out.setdefault(r.columns[b], (r.columns[a], C[a, b]))
+    return out
+
+
+def screen(r: pd.DataFrame, q: float, zero_max: float, sd_min_bp: float,
+           rho_max: float) -> pd.DataFrame:
+    dup = duplicates(r, rho_max)
     rows = []
     for c in r.columns:
         x = r[c].to_numpy(dtype=float)
@@ -76,10 +90,12 @@ def screen(r: pd.DataFrame, q: float) -> pd.DataFrame:
             why.append(f"persistent: acf1 {acf1:.2f}")
         if jump > 50:
             why.append(f"jumps: max|r-med|/IQR {jump:.0f}")
-        if (x == 0).mean() > 0.02:
+        if (x == 0).mean() > zero_max:
             why.append(f"zeros {(x == 0).mean():.1%}")
-        if x.std() < 1e-4:
-            why.append(f"sd {x.std() * 1e4:.2f}bp")
+        if x.std() < sd_min_bp * 1e-4:
+            why.append(f"riskless: sd {x.std() * 1e4:.2f}bp")
+        if c in dup:
+            why.append(f"duplicate of {dup[c][0]} (corr {dup[c][1]:+.3f})")
         rows.append(dict(valor=c, status="BAD" if bad else ("WARN" if why else "ok"),
                          sd_bp=x.std() * 1e4, neg_frac=(x < 0).mean(), zero_frac=(x == 0).mean(),
                          q_lo=u_lo, xi_lo=xi_lo, xi_hi=xi_hi, acf1=acf1, jump_iqr=jump,
@@ -89,8 +105,10 @@ def screen(r: pd.DataFrame, q: float) -> pd.DataFrame:
             .sort_values(["_o", "sd_bp"]).drop(columns="_o").reset_index(drop=True))
 
 
-def figure(r: pd.DataFrame, tab: pd.DataFrame, q: float, path: str, top: int) -> None:
-    flagged = tab[tab.status != "ok"].head(top)
+def figure(r: pd.DataFrame, tab: pd.DataFrame, q: float, path: str, top: int,
+           extra=()) -> None:
+    pick = list(extra) + [v for v in tab.valor[tab.status != "ok"].head(top) if v not in extra]
+    flagged = tab.set_index("valor").loc[pick].reset_index()
     if flagged.empty:
         return
     fig, axes = plt.subplots(len(flagged), 3, figsize=(15, 2.4 * len(flagged)), squeeze=False)
@@ -134,6 +152,11 @@ def main():
     ap.add_argument("--out", default="fig/screen")
     ap.add_argument("--q-tail", type=float, default=0.05, help="as train_tailfm.py --q-tail")
     ap.add_argument("--top", type=int, default=30, help="flagged VALORs plotted")
+    ap.add_argument("--plot", default="", help="comma-separated VALORs plotted first")
+    ap.add_argument("--zero-frac", type=float, default=0.08, help="WARN above this zero fraction")
+    ap.add_argument("--sd-bp", type=float, default=2.0,
+                    help="daily sd below this (bp) = near-riskless: WARN and drop.txt")
+    ap.add_argument("--dup-corr", type=float, default=0.99, help="WARN above this |corr|")
     ap.add_argument("--reference", default=None,
                     help="CSV whose VALORs get equal weight in weights_reference.txt")
     a = ap.parse_args()
@@ -141,7 +164,7 @@ def main():
 
     r = pd.read_csv(a.data, index_col=0, parse_dates=True)
     r.columns = [str(c) for c in r.columns]
-    tab = screen(r, a.q_tail)
+    tab = screen(r, a.q_tail, a.zero_frac, a.sd_bp, a.dup_corr)
     tab.to_csv(os.path.join(a.out, "screen.csv"), index=False)
     with pd.option_context("display.width", 200, "display.max_colwidth", 80,
                            "display.float_format", "{:.3g}".format):
@@ -149,17 +172,29 @@ def main():
     n = tab.status.value_counts()
     print(f"\n{len(tab)} VALORs: {n.get('BAD', 0)} BAD, {n.get('WARN', 0)} WARN, {n.get('ok', 0)} ok")
     print("BAD: " + ",".join(tab.valor[tab.status == "BAD"]))
+    drop = list(tab.valor[(tab.status == "BAD") | (tab.sd_bp < a.sd_bp)])
+    print(f"drop.txt ({len(drop)}, BAD + sd < {a.sd_bp}bp): " + ",".join(drop))
+    dups = tab[tab.why.str.contains("duplicate")]
+    if len(dups):
+        print("duplicates (decide which to keep): "
+              + "; ".join(f"{v}: {w.split('duplicate of ')[1].split(';')[0]}" for v, w in zip(dups.valor, dups.why)))
+    with open(os.path.join(a.out, "drop.txt"), "w") as fh:
+        fh.write("\n".join(drop) + "\n")
 
-    figure(r, tab, a.q_tail, os.path.join(a.out, "screen.png"), a.top)
+    extra = [s.strip() for s in a.plot.split(",") if s.strip()]
+    missing = [v for v in extra if v not in r.columns]
+    if missing:
+        raise SystemExit(f"--plot: not in {a.data}: {missing}")
+    figure(r, tab, a.q_tail, os.path.join(a.out, "screen.png"), a.top, extra)
     cols = list(r.columns)
-    bad = set(tab.valor[tab.status == "BAD"])
-    write_weights(cols, np.array([c not in bad for c in cols]), os.path.join(a.out, "weights_clean.txt"))
+    write_weights(cols, np.array([c not in set(drop) for c in cols]),
+                  os.path.join(a.out, "weights_clean.txt"))
     if a.reference:
         ref = {str(c) for c in pd.read_csv(a.reference, index_col=0, nrows=0).columns}
         keep = np.array([c in ref for c in cols])
         write_weights(cols, keep, os.path.join(a.out, "weights_reference.txt"))
         print(f"weights_reference.txt: {keep.sum()} VALORs of {a.reference}")
-    print(f"wrote {a.out}/screen.csv, screen.png, weights_clean.txt"
+    print(f"wrote {a.out}/screen.csv, screen.png, drop.txt, weights_clean.txt"
           + (", weights_reference.txt" if a.reference else ""))
 
 
