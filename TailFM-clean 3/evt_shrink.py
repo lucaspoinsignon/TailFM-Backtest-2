@@ -91,25 +91,13 @@ def exceedances(m, x_col: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def shrink_ensemble(marg, x: np.ndarray, c: float = 1.0,
-                    xi_min: float | None = 0.0, verbose: bool = True,
-                    groups: list | None = None) -> dict:
+                    xi_min: float | None = 0.0, verbose: bool = True) -> dict:
     """Re-estimate and pool the tails of a fitted MarginalEnsemble, in place.  `x` must
-    be the array passed to marg.fit, since the thresholds are kept.  `groups`: lists of
-    feature indices pooled separately (e.g. equities and money market); default one pool.
+    be the array passed to marg.fit, since the thresholds are kept.
     """
     cols = np.asarray(x, dtype=float).reshape(-1, np.shape(x)[-1])
     m_list = marg.marginals_
     f = len(m_list)
-    if groups is not None:
-        out = {}
-        for g in groups:
-            g = np.asarray(g, dtype=int)
-            if verbose:
-                print(f"  pool of {g.size} features:")
-            sub = type(marg).__new__(type(marg))
-            sub.marginals_ = [m_list[j] for j in g]
-            out[tuple(g)] = shrink_ensemble(sub, cols[:, g], c, xi_min, verbose)
-        return out
 
     exc = [exceedances(m_list[j], cols[:, j]) for j in range(f)]
     xi_lo = np.array([fit_gpd_zs(e[0])[0] for e in exc])
