@@ -1,12 +1,18 @@
 ```bash
 
+python check.py --data data/returns06.csv       
 
-python - <<'EOF'
-import numpy as np, pandas as pd
-d = pd.to_datetime(pd.read_csv("data/returns06.csv", usecols=[0]).iloc[:, 0]).values.astype("datetime64[D]")
-k = np.busday_count(d[:-1], d[1:])
-print(d[0], "->", d[-1], len(d), "|", " ".join(f"{a}:{b}" for a, b in zip(*np.unique(k, return_counts=True))))
-print("spans > 10 weekdays:", ", ".join(f"{d[i]} -> {d[i + 1]} ({k[i]})" for i in np.flatnonzero(k > 10)))
-EOF
+python train_tailfm.py --data data/returns06.csv --train-all --outdir runs/r06
+python generate.py --data data/returns06.csv --run runs/r06
+python evaluate.py --data data/returns06.csv --gen runs/r06/generated_windows.npy
+python run_backtest.py --data data/returns06.csv --gen runs/r06/generated_windows.npy --horizon 1,10
+python stylized_facts.py --data data/returns06.csv --gen runs/r06/generated_windows.npy
+
+python train_tailfm.py --data data/returns06.csv --cond-valor 4155001 --train-all --outdir runs/r06u
+python generate.py --data data/returns06.csv --run runs/r06u --band 0.87 0.93
+python evaluate.py --data data/returns06.csv --gen runs/r06u/generated_windows_u0.87-0.93.npy
+python run_backtest.py --data data/returns06.csv --gen runs/r06u/generated_windows_u0.87-0.93.npy --horizon 1,10
+python stylized_facts.py --data data/returns06.csv --gen runs/r06u/generated_windows_u0.87-0.93.npy
+python regime_calibration.py --data data/returns06.csv --run runs/r06u
 
 ```
